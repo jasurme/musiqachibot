@@ -36,11 +36,22 @@ rejects yt-dlp with *"Sign in to confirm you're not a bot"* / HTTP 403.
 Reported success: **datacenter ~20–40%** vs **residential ~85–95%**.
 
 So **search (Feature A) and audio download may be flaky on Railway** unless you add:
-- **Cookies** (biggest easy win): export a `cookies.txt` (Netscape format, via a
-  browser extension) from a throwaway Google account, add it to the service (e.g.
-  a Railway *file* mount or bake it in), and set `YTDLP_COOKIES_FILE=/app/cookies.txt`.
-- **A residential proxy** (highest impact): set `YTDLP_PROXY=http://user:pass@host:port`.
-- Keep `yt-dlp` fresh — it's already unpinned in `requirements.txt` so redeploys pull the latest.
+
+**Cookies** (biggest easy win):
+1. In a browser, log into YouTube with a **throwaway Google account**.
+2. Install a cookies exporter extension — *"Get cookies.txt LOCALLY"* (Chrome) or
+   *"cookies.txt"* (Firefox) — open youtube.com, click it, and **Export** a
+   `cookies.txt` (Netscape format).
+3. On Railway: open that file, copy **all** its text, and paste it into a variable
+   **`YTDLP_COOKIES_CONTENT`**. The app writes it to a file on startup automatically.
+   (Locally instead: save the file and set `YTDLP_COOKIES_FILE=./cookies.txt`.)
+   ⚠️ Cookies = a login session — treat like a password, use a throwaway account, never commit it.
+
+**A residential proxy** (highest impact): from a provider (Webshare, IPRoyal,
+Smartproxy, Bright Data…), set `YTDLP_PROXY=http://user:pass@host:port`
+(or `socks5://...`). Must be **residential** — datacenter proxies are blocked too.
+
+`yt-dlp` is unpinned in `requirements.txt`, so redeploys pull the latest fixes.
 
 Instagram/TikTok are less aggressive but can also need cookies for private/rate-limited content.
 Both `YTDLP_COOKIES_FILE` and `YTDLP_PROXY` are already wired into every yt-dlp call.

@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import tempfile
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -26,6 +28,22 @@ logging.basicConfig(
 logger = logging.getLogger("musiqa")
 
 
+def _materialize_cookies() -> None:
+    """Railway/cloud hosts expose string env vars, not files. If cookies are
+    provided as YTDLP_COOKIES_CONTENT, write them to a file and point
+    YTDLP_COOKIES_FILE at it so yt-dlp can use them."""
+    content = os.getenv("YTDLP_COOKIES_CONTENT")
+    if content and not os.getenv("YTDLP_COOKIES_FILE"):
+        path = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
+        try:
+            with open(path, "w") as f:
+                f.write(content)
+            os.environ["YTDLP_COOKIES_FILE"] = path
+            logger.info("Loaded YouTube cookies from YTDLP_COOKIES_CONTENT")
+        except OSError as exc:
+            logger.warning("could not write cookies file: %s", exc)
+
+
 async def _set_commands(bot: Bot) -> None:
     from aiogram.types import BotCommand
     commands = [
@@ -41,6 +59,7 @@ async def _set_commands(bot: Bot) -> None:
 
 async def main() -> None:
     config = load_config()
+    _materialize_cookies()
 
     session = None
     if config.local_api_url:

@@ -72,6 +72,22 @@ def test_search_item_url():
     assert it.url == "https://www.youtube.com/watch?v=abc123"
 
 
+def test_cookies_content_materialized(monkeypatch):
+    from bot.main import _materialize_cookies
+    from bot.services.downloader import _net_opts
+    monkeypatch.delenv("YTDLP_COOKIES_FILE", raising=False)
+    monkeypatch.setenv("YTDLP_COOKIES_CONTENT", "# Netscape HTTP Cookie File\n")
+    try:
+        _materialize_cookies()
+        path = os.environ.get("YTDLP_COOKIES_FILE")
+        assert path and os.path.exists(path)
+        assert _net_opts().get("cookiefile") == path  # picked up by yt-dlp opts
+    finally:
+        leaked = os.environ.pop("YTDLP_COOKIES_FILE", None)
+        if leaked and os.path.exists(leaked):
+            os.remove(leaked)
+
+
 # ── round video-note conversion (real ffmpeg, no network) ─
 async def test_make_video_note_is_square(tmp_path):
     src = str(tmp_path / "src.mp4")
