@@ -15,5 +15,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# yt-dlp fights a constant cat-and-mouse with YouTube. The requirements layer
+# above gets cached across builds, so refresh yt-dlp here (this layer rebuilds
+# whenever code changes) to always ship the latest anti-block fixes.
+RUN pip install --no-cache-dir --upgrade yt-dlp
+
 # long-polling worker — no web server / port needed
 CMD ["python", "-m", "bot.main"]
