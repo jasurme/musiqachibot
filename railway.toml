@@ -1,0 +1,8 @@
+# Railway build/deploy config. Forces the Dockerfile builder (deterministic)
+# and restarts the worker on failure.
+[build]
+builder = "DOCKERFILE"
+
+[deploy]
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

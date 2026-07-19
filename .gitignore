@@ -1,0 +1,22 @@
+# Secrets — NEVER commit
+.env
+*.session
+cookies.txt
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Data / runtime
+downloads/
+*.db
+*.sqlite3
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

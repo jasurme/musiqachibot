@@ -1,0 +1,186 @@
+"""Shared test harness.
+
+`bot` is a real aiogram Bot whose network layer is replaced by a fake that
+CAPTURES every outgoing method (SendMessage, SendAudio, ...) and returns a
+plausible bound Message, so handlers run end-to-end with zero network.
+"""
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.types import (
+    Audio,
+    CallbackQuery,
+    Chat,
+    Message,
+    PhotoSize,
+    Update,
+    User,
+    Video,
+    Voice,
+)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from bot.config import Config
+from bot.db.storage import Storage
+from bot.handlers import (
+    media_recognize,
+    results,
+    round as round_handler,
+    start,
+    text_search,
+    url_download,
+)
+from bot.middlewares.i18n import I18nMiddleware
+
+FAKE_TOKEN = "123456:FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE"
+ALL_ROUTERS = (round_handler.router, start.router, url_download.router,
+               media_recognize.router, text_search.router, results.router)
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+class Capture:
+    def __init__(self):
+        self.methods = []
+
+    def by(self, name):
+        return [m for m in self.methods if type(m).__name__ == name]
+
+    def last(self, name):
+        xs = self.by(name)
+        return xs[-1] if xs else None
+
+    def names(self):
+        return [type(m).__name__ for m in self.methods]
+
+
+@pytest.fixture
+def cap():
+    return Capture()
+
+
+@pytest_asyncio.fixture
+async def bot(cap):
+    b = Bot(FAKE_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    counter = {"n": 0}
+
+    async def fake_make_request(bot_, method, timeout=None):
+        cap.methods.append(method)
+        counter["n"] += 1
+        n = counter["n"]
+        name = type(method).__name__
+        if name in ("AnswerCallbackQuery", "DeleteMessage"):
+            return True
+        if name == "SendAudio":
+            msg = Message(message_id=n, date=_now(), chat=Chat(id=1, type="private"),
+                          audio=Audio(file_id=f"AUDIO_{n}", file_unique_id=f"u{n}", duration=1))
+        elif name == "SendVideo":
+            msg = Message(message_id=n, date=_now(), chat=Chat(id=1, type="private"),
+                          video=Video(file_id=f"VIDEO_{n}", file_unique_id=f"u{n}",
+                                      width=1, height=1, duration=1))
+        elif name == "SendPhoto":
+            msg = Message(message_id=n, date=_now(), chat=Chat(id=1, type="private"),
+                          photo=[PhotoSize(file_id=f"PHOTO_{n}", file_unique_id=f"u{n}",
+                                           width=1, height=1)])
+        else:
+            msg = Message(message_id=n, date=_now(), chat=Chat(id=1, type="private"),
+                          text=getattr(method, "text", None) or getattr(method, "caption", None))
+        return msg.as_(bot_)
+
+    b.session.make_request = fake_make_request
+    yield b
+    await b.session.close()
+
+
+@pytest.fixture
+def config(tmp_path):
+    return Config(
+        bot_token="x", local_api_url=None, default_locale="en",
+        download_dir=str(tmp_path), max_file_mb=50,
+        spotify_client_id=None, spotify_client_secret=None,
+        genius_token=None, audd_token=None,
+    )
+
+
+@pytest_asyncio.fixture
+async def storage():
+    s = Storage(":memory:")
+    await s.init()
+    yield s
+    await s.close()
+
+
+@pytest.fixture(autouse=True)
+def _clear_module_state():
+    results._SESS.clear()
+    url_download._PENDING.clear()
+    yield
+    results._SESS.clear()
+    url_download._PENDING.clear()
+
+
+@pytest_asyncio.fixture
+async def dp(storage, config):
+    for r in ALL_ROUTERS:  # allow re-attaching singleton routers each test
+        r._parent_router = None
+    d = Dispatcher()
+    d["db"] = storage
+    d["config"] = config
+    d["bot_username"] = "testbot"
+    i18n = I18nMiddleware(storage)
+    d.message.middleware(i18n)
+    d.callback_query.middleware(i18n)
+    for r in ALL_ROUTERS:
+        d.include_router(r)
+    return d
+
+
+# ── update builders ──────────────────────────────────────
+def text_update(text, uid=1, lang="en", user_id=100, chat_id=100, chat_type="private"):
+    return Update(update_id=uid, message=Message(
+        message_id=uid, date=_now(), chat=Chat(id=chat_id, type=chat_type),
+        from_user=User(id=user_id, is_bot=False, first_name="T", language_code=lang),
+        text=text,
+    ))
+
+
+def callback_update(data, uid=1, lang="en", user_id=100, chat_id=100):
+    return Update(update_id=uid, callback_query=CallbackQuery(
+        id=str(uid), chat_instance="ci", data=data,
+        from_user=User(id=user_id, is_bot=False, first_name="T", language_code=lang),
+        message=Message(message_id=uid + 5000, date=_now(), chat=Chat(id=chat_id, type="private")),
+    ))
+
+
+def voice_update(uid=1, lang="en", user_id=100, chat_id=100, chat_type="private"):
+    return Update(update_id=uid, message=Message(
+        message_id=uid, date=_now(), chat=Chat(id=chat_id, type=chat_type),
+        from_user=User(id=user_id, is_bot=False, first_name="T", language_code=lang),
+        voice=Voice(file_id="VOICE1", file_unique_id="vu1", duration=5),
+    ))
+
+
+def video_update(uid=1, lang="en", user_id=100, chat_id=100):
+    return Update(update_id=uid, message=Message(
+        message_id=uid, date=_now(), chat=Chat(id=chat_id, type="private"),
+        from_user=User(id=user_id, is_bot=False, first_name="T", language_code=lang),
+        video=Video(file_id="VID1", file_unique_id="vu1", width=100, height=100, duration=10),
+    ))
+
+
+def first_callback_data(markup, prefix):
+    """Return the first callback_data starting with prefix in an inline markup."""
+    for row in markup.inline_keyboard:
+        for btn in row:
+            if btn.callback_data and btn.callback_data.startswith(prefix):
+                return btn.callback_data
+    return None
