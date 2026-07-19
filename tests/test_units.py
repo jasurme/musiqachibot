@@ -72,6 +72,21 @@ def test_search_item_url():
     assert it.url == "https://www.youtube.com/watch?v=abc123"
 
 
+def test_search_filters_out_long_albums():
+    from bot.services.search import _entries_to_items
+    entries = [
+        {"id": "song", "title": "Ummon - Qanday unutding", "duration": 244},
+        {"id": "album", "title": "Ummon - Full Album 2015", "duration": 5580},  # 93 min
+        {"id": "nodur", "title": "Unknown length", "duration": None},
+        {"id": "", "title": "no id", "duration": 100},  # dropped: no id
+    ]
+    ids = [it.video_id for it in _entries_to_items(entries, max_seconds=1200)]
+    assert "song" in ids
+    assert "album" not in ids     # 93-min album filtered → no 128 MB "too big"
+    assert "nodur" in ids         # unknown duration kept
+    assert "" not in ids
+
+
 def test_cookies_content_materialized(monkeypatch):
     from bot.main import _materialize_cookies
     from bot.services.downloader import _net_opts
