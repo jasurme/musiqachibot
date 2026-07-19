@@ -53,6 +53,14 @@ def _net_opts() -> dict:
     proxy = os.getenv("YTDLP_PROXY")
     if proxy:
         opts["proxy"] = proxy
+    # On datacenter IPs YouTube may withhold formats ("Requested format is not
+    # available"). Trying alternate player clients often restores them.
+    # e.g. YTDLP_PLAYER_CLIENT="tv,web_safari,android"
+    clients = os.getenv("YTDLP_PLAYER_CLIENT")
+    if clients:
+        opts["extractor_args"] = {
+            "youtube": {"player_client": [c.strip() for c in clients.split(",") if c.strip()]}
+        }
     return opts
 
 
