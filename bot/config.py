@@ -36,7 +36,7 @@ class Config:
     # Bounds all expensive user pipelines (provider, ffmpeg, recognition).
     heavy_job_concurrency: int = 3
     search_max_seconds: int = 1200
-    search_cache_seconds: int = 300
+    search_cache_seconds: int = 3600
     privacy_policy_url: str | None = None
 
 
@@ -115,7 +115,7 @@ def load_config() -> Config:
     ytdlp_concurrency = _positive_int("YTDLP_CONCURRENCY", 3)
     heavy_job_concurrency = _positive_int("HEAVY_JOB_CONCURRENCY", 3)
     search_max_seconds = _positive_int("SEARCH_MAX_SECONDS", 1200)
-    search_cache_seconds = _nonnegative_int("SEARCH_CACHE_SECONDS", 300)
+    search_cache_seconds = _nonnegative_int("SEARCH_CACHE_SECONDS", 3600)
     if ytdlp_concurrency > 8:
         raise RuntimeError("YTDLP_CONCURRENCY cannot exceed 8")
     if heavy_job_concurrency > 8:

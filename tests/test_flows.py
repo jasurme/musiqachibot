@@ -1,4 +1,7 @@
 """End-to-end flow tests: real updates through the real dispatcher, network faked."""
+import asyncio
+import os
+
 import pytest
 
 from bot.handlers import results, url_download
@@ -100,16 +103,23 @@ async def test_language_switch_persists(dp, bot, cap, storage):
 
 # ── Feature A: search → list → pick → cache ─────────────
 async def test_search_shows_numbered_list(dp, bot, cap, monkeypatch):
+    seen = {}
+
     async def fake_search(q, limit=30):
-        return _items(30)
+        seen["limit"] = limit
+        return _items(limit)
     monkeypatch.setattr("bot.handlers.text_search.search_tracks", fake_search)
 
     await dp.feed_update(bot, text_update("ummon"))
-    em = cap.last("EditMessageText")
-    assert em is not None
-    assert "<b>1.</b>" in em.text and "<b>10.</b>" in em.text
-    assert first_callback_data(em.reply_markup, "pick:") is not None
-    assert first_callback_data(em.reply_markup, "page:") is not None  # 30 items → paging
+    sm = cap.last("SendMessage")
+    assert sm is not None
+    assert seen["limit"] == 5
+    assert "<b>1.</b>" in sm.text and "<b>5.</b>" in sm.text
+    assert "<b>6.</b>" not in sm.text
+    assert first_callback_data(sm.reply_markup, "pick:") is not None
+    assert first_callback_data(sm.reply_markup, "page:") is None
+    assert len(cap.by("SendMessage")) == 1
+    assert cap.by("EditMessageText") == []
 
 
 async def test_search_no_results(dp, bot, cap, monkeypatch):
@@ -117,8 +127,23 @@ async def test_search_no_results(dp, bot, cap, monkeypatch):
         return []
     monkeypatch.setattr("bot.handlers.text_search.search_tracks", fake_search)
     await dp.feed_update(bot, text_update("zzzxxx"))
-    em = cap.last("EditMessageText")
-    assert "😔" in em.text
+    sm = cap.last("SendMessage")
+    assert "😔" in sm.text
+    assert len(cap.by("SendMessage")) == 1
+    assert cap.by("EditMessageText") == []
+
+
+async def test_search_failure_is_a_single_direct_error(dp, bot, cap, monkeypatch):
+    async def fake_search(q, limit=5):
+        raise downloader.ProviderBusy("media provider queue is busy")
+
+    monkeypatch.setattr("bot.handlers.text_search.search_tracks", fake_search)
+    await dp.feed_update(bot, text_update("ummon"))
+
+    messages = cap.by("SendMessage")
+    assert len(messages) == 1 and "busy" in messages[0].text.lower()
+    assert cap.by("EditMessageText") == []
+    assert cap.by("DeleteMessage") == []
 
 
 async def test_unsupported_url_is_not_sent_to_music_search(dp, bot, cap, monkeypatch):
@@ -157,15 +182,21 @@ async def test_pick_downloads_signs_and_caches(dp, bot, cap, config, monkeypatch
 
     # 1) search to create a session + get a real pick token
     await dp.feed_update(bot, text_update("ummon"))
-    token_data = first_callback_data(cap.last("EditMessageText").reply_markup, "pick:")
+    token_data = first_callback_data(cap.last("SendMessage").reply_markup, "pick:")
     assert token_data
 
     # 2) first pick → downloads, sends with signature, caches file_id
+    cap.methods.clear()
     await dp.feed_update(bot, callback_update(token_data, uid=2))
     sa = cap.last("SendAudio")
     assert sa is not None and "👉 @testbot" in sa.caption
     assert counter["n"] == 1
     assert await storage.get_cached_audio("bot:123456:ytaudio:v0") is not None
+    ack = cap.last("AnswerCallbackQuery")
+    assert ack is not None and ack.text is None
+    assert cap.names().index("AnswerCallbackQuery") < cap.names().index("SendAudio")
+    assert cap.by("SendMessage") == []
+    assert cap.by("DeleteMessage") == []
 
     # 3) second identical pick → NO new download, reuses cached file_id
     cap.methods.clear()
@@ -173,6 +204,58 @@ async def test_pick_downloads_signs_and_caches(dp, bot, cap, config, monkeypatch
     sa2 = cap.last("SendAudio")
     assert counter["n"] == 1, "cache miss — should not re-download"
     assert isinstance(sa2.audio, str) and sa2.audio.startswith("AUDIO_")
+
+
+async def test_cached_track_bypasses_busy_heavy_job_limit(
+    dp, bot, cap, storage,
+):
+    results._SESS["cached"] = {
+        "header": "h", "items": _items(1), "per_page": 5,
+        "extras": False, "owner_user_id": None,
+    }
+    await storage.set_cached_audio(
+        "bot:123456:ytaudio:v0", "CACHED_AUDIO", "Song"
+    )
+    jobs.configure(1)
+    assert jobs.claim(999)
+
+    await dp.feed_update(bot, callback_update("pick:cached:0"))
+
+    assert cap.last("SendAudio").audio == "CACHED_AUDIO"
+
+
+async def test_simultaneous_track_picks_share_one_download(
+    dp, bot, cap, config, monkeypatch,
+):
+    results._SESS["shared"] = {
+        "header": "h", "items": _items(1), "per_page": 5,
+        "extras": False, "owner_user_id": None,
+    }
+    calls = 0
+
+    async def slow_download(url, out_dir, max_bytes=None):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        path = os.path.join(config.download_dir, "shared.m4a")
+        with open(path, "wb") as stream:
+            stream.write(b"audio")
+        return DownloadResult(
+            path=path, title="Song", uploader="Artist", duration=10, ext="m4a"
+        )
+
+    monkeypatch.setattr(downloader, "download_audio", slow_download)
+    await asyncio.gather(
+        dp.feed_update(
+            bot, callback_update("pick:shared:0", uid=101, user_id=101)
+        ),
+        dp.feed_update(
+            bot, callback_update("pick:shared:0", uid=102, user_id=102)
+        ),
+    )
+
+    assert calls == 1
+    assert len(cap.by("SendAudio")) == 2
 
 
 async def test_repeated_tap_does_not_start_overlapping_job(dp, bot, cap, config, monkeypatch):
@@ -188,16 +271,17 @@ async def test_repeated_tap_does_not_start_overlapping_job(dp, bot, cap, config,
     assert answer.show_alert is True and "still processing" in answer.text
 
 
-async def test_pagination_next_page(dp, bot, cap, monkeypatch):
+async def test_pagination_handles_unexpected_extra_results(dp, bot, cap, monkeypatch):
+    # Keep the shared component defensive if a provider returns over its limit.
     async def fake_search(q, limit=30):
         return _items(30)
     monkeypatch.setattr("bot.handlers.text_search.search_tracks", fake_search)
     await dp.feed_update(bot, text_update("ummon"))
-    page_data = first_callback_data(cap.last("EditMessageText").reply_markup, "page:")
+    page_data = first_callback_data(cap.last("SendMessage").reply_markup, "page:")
     cap.methods.clear()
     await dp.feed_update(bot, callback_update(page_data, uid=4))
     em = cap.last("EditMessageText")
-    assert "<b>11.</b>" in em.text and "<b>20.</b>" in em.text
+    assert "<b>6.</b>" in em.text and "<b>10.</b>" in em.text
 
 
 # ── Feature C: recognition ───────────────────────────────
@@ -235,6 +319,27 @@ async def test_recognition_shows_header_art_and_extras(dp, bot, cap, monkeypatch
     assert any(d.startswith("pick:") for d in datas)
 
 
+async def test_cached_recognition_bypasses_busy_heavy_job_limit(
+    dp, bot, cap, monkeypatch, storage,
+):
+    await storage.set_recognition("vu1", "Believer", "Imagine Dragons")
+
+    async def fake_search(q, limit=5):
+        return _items(5)
+
+    async def should_not_download(*args, **kwargs):
+        raise AssertionError("cached recognition should not download media")
+
+    monkeypatch.setattr("bot.handlers.media_recognize.search_tracks", fake_search)
+    monkeypatch.setattr(bot, "download", should_not_download)
+    jobs.configure(1)
+    assert jobs.claim(999)
+
+    await dp.feed_update(bot, voice_update())
+
+    assert "Believer" in cap.last("SendMessage").text
+
+
 async def test_recognition_failure(dp, bot, cap, monkeypatch):
     async def fake_download(media, destination=None, **kw):
         assert kw == {"timeout": 300}
@@ -245,8 +350,10 @@ async def test_recognition_failure(dp, bot, cap, monkeypatch):
     monkeypatch.setattr("bot.handlers.media_recognize.get_recognizer",
                         lambda cfg: _FakeRec(None))
     await dp.feed_update(bot, voice_update())
-    em = cap.last("EditMessageText")
-    assert "😔" in em.text
+    sm = cap.last("SendMessage")
+    assert "😔" in sm.text
+    assert len(cap.by("SendMessage")) == 1
+    assert cap.by("EditMessageText") == []
 
 
 async def test_recognition_survives_enrichment_search_outage(
@@ -300,6 +407,9 @@ async def test_lyrics_button_found(dp, bot, cap, monkeypatch):
     await dp.feed_update(bot, callback_update("lyr:tok"))
     sm = cap.last("SendMessage")
     assert "believer" in sm.text.lower()
+    ack = cap.last("AnswerCallbackQuery")
+    assert ack is not None and ack.text is None
+    assert cap.names().index("AnswerCallbackQuery") < cap.names().index("SendMessage")
 
 
 async def test_lyrics_button_not_found(dp, bot, cap, monkeypatch):
@@ -324,6 +434,23 @@ async def test_url_link_shows_quality_picker(dp, bot, cap, monkeypatch):
     datas = [b.callback_data for row in sm.reply_markup.inline_keyboard for b in row]
     assert any(d.startswith("dl:") and d.endswith(":360") for d in datas)
     assert any(d.endswith(":audio") for d in datas)
+    assert len(cap.by("SendMessage")) == 1
+    assert cap.by("DeleteMessage") == []
+
+
+async def test_url_metadata_failure_is_a_single_direct_error(
+    dp, bot, cap, monkeypatch,
+):
+    async def fake_meta(url):
+        raise downloader.yt_dlp.utils.DownloadError("Private video")
+
+    monkeypatch.setattr(downloader, "extract_meta", fake_meta)
+    await dp.feed_update(bot, text_update("https://youtu.be/private"))
+
+    messages = cap.by("SendMessage")
+    assert len(messages) == 1 and "private" in messages[0].text.lower()
+    assert cap.by("EditMessageText") == []
+    assert cap.by("DeleteMessage") == []
 
 
 async def test_video_button_reuses_quality_picker(dp, bot, cap, monkeypatch):
@@ -375,9 +502,14 @@ async def test_quality_audio_download(dp, bot, cap, config, monkeypatch, storage
     sa = cap.last("SendAudio")
     assert sa is not None and "👉 @testbot" in sa.caption
     assert counter["n"] == 1
-    # cached under the dl: key
+    ack = cap.last("AnswerCallbackQuery")
+    assert ack is not None and ack.text is None
+    assert cap.names().index("AnswerCallbackQuery") < cap.names().index("SendAudio")
+    assert cap.by("SendMessage") == []
+    assert cap.by("DeleteMessage") == []
+    # Direct YouTube links share the same canonical cache as text search.
     assert await storage.get_cached_audio(
-        "bot:123456:dl:https://youtu.be/abc:audio"
+        "bot:123456:ytaudio:abc"
     ) is not None
 
 
@@ -387,7 +519,7 @@ async def test_cached_media_bypasses_provider_circuit(
     url = "https://youtu.be/abc"
     url_download._PENDING["tok"] = {"url": url, "title": "Song"}
     await storage.set_cached_audio(
-        f"bot:{bot.id}:dl:{url}:audio", "CACHED_AUDIO", "Song"
+        f"bot:{bot.id}:ytaudio:abc", "CACHED_AUDIO", "Song"
     )
     downloader.record_provider_failure(
         url, downloader.yt_dlp.utils.DownloadError("HTTP Error 403: Forbidden")
@@ -400,6 +532,31 @@ async def test_cached_media_bypasses_provider_circuit(
     await dp.feed_update(bot, callback_update("dl:tok:audio"))
     sent = cap.last("SendAudio")
     assert sent is not None and sent.audio == "CACHED_AUDIO"
+    ack = cap.last("AnswerCallbackQuery")
+    assert ack is not None and ack.text is None
+    assert cap.names().index("AnswerCallbackQuery") < cap.names().index("SendAudio")
+
+
+async def test_quality_failure_acks_then_sends_direct_error(
+    dp, bot, cap, monkeypatch,
+):
+    url_download._PENDING["tok"] = {
+        "url": "https://youtu.be/private", "title": "Song",
+    }
+
+    async def fail_download(*args, **kwargs):
+        raise downloader.yt_dlp.utils.DownloadError("Private video")
+
+    monkeypatch.setattr(downloader, "download_audio", fail_download)
+    await dp.feed_update(bot, callback_update("dl:tok:audio"))
+
+    ack = cap.last("AnswerCallbackQuery")
+    message = cap.last("SendMessage")
+    assert ack is not None and ack.text is None
+    assert message is not None and "private" in message.text.lower()
+    assert cap.names().index("AnswerCallbackQuery") < cap.names().index("SendMessage")
+    assert cap.by("EditMessageText") == []
+    assert cap.by("DeleteMessage") == []
 
 
 async def test_quality_video_download(dp, bot, cap, config, monkeypatch):
@@ -449,6 +606,11 @@ async def test_link_find_music_button(dp, bot, cap, config, monkeypatch):
     datas = [b.callback_data for row in ph.reply_markup.inline_keyboard for b in row]
     assert any(d.startswith("pick:") for d in datas)
     assert any(d.startswith("lyr:") for d in datas)
+    ack = cap.last("AnswerCallbackQuery")
+    assert ack is not None and ack.text is None
+    assert cap.names().index("AnswerCallbackQuery") < cap.names().index("SendPhoto")
+    assert cap.by("SendMessage") == []
+    assert cap.by("DeleteMessage") == []
 
 
 async def test_link_find_music_not_recognized(dp, bot, cap, config, monkeypatch):
@@ -470,7 +632,8 @@ async def test_link_find_music_not_recognized(dp, bot, cap, config, monkeypatch)
     monkeypatch.setattr("bot.handlers.media_recognize.get_recognizer", lambda cfg: _Rec())
 
     await dp.feed_update(bot, callback_update("dl:tok:music"))
-    assert "😔" in cap.last("EditMessageText").text
+    assert "😔" in cap.last("SendMessage").text
+    assert cap.by("EditMessageText") == []
 
 
 # ── group behaviour (tag to search, auto-handle links) ───
@@ -497,7 +660,7 @@ async def test_group_tagged_searches(dp, bot, cap, monkeypatch):
 
     await dp.feed_update(bot, text_update("@testbot believer", chat_type="supergroup", chat_id=-100))
     assert seen.get("q") == "believer"  # bot mention stripped from the query
-    assert cap.last("EditMessageText") is not None
+    assert cap.last("SendMessage") is not None
 
 
 async def test_group_link_requires_mention(dp, bot, cap, monkeypatch):
@@ -570,7 +733,7 @@ async def test_video_normally_recognizes_not_rounds(dp, bot, cap, config, monkey
                         lambda cfg: _FakeRec(None))
     await dp.feed_update(bot, video_update())
     assert cap.by("SendVideoNote") == []  # not rounded
-    assert "😔" in cap.last("EditMessageText").text  # recognition path ran
+    assert "😔" in cap.last("SendMessage").text  # recognition path ran
 
 
 # ── the "havola eskirdi" fix: sessions survive a restart ─
@@ -583,7 +746,7 @@ async def test_results_button_survives_restart(dp, bot, cap, config, monkeypatch
     monkeypatch.setattr("bot.handlers.text_search.search_tracks", fake_search)
 
     await dp.feed_update(bot, text_update("ummon"))
-    token_data = first_callback_data(cap.last("EditMessageText").reply_markup, "pick:")
+    token_data = first_callback_data(cap.last("SendMessage").reply_markup, "pick:")
 
     # simulate a bot restart: in-memory session cache is wiped, only DB remains
     results._SESS.clear()

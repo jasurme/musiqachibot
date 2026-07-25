@@ -204,6 +204,8 @@ def test_ytdlp_options_suppress_terminal_progress():
 
 def test_audio_fallback_never_selects_unrestricted_full_video():
     assert downloader._AUDIO_FORMAT_SELECTOR == (
+        "bestaudio[ext=m4a]/"
+        "bestaudio[ext=mp3]/"
         "bestaudio/"
         "best[acodec!=none][height<=360]/"
         "worst[acodec!=none]"
@@ -598,6 +600,36 @@ def test_search_item_url():
     assert it.url == "https://www.youtube.com/watch?v=abc123"
 
 
+@pytest.mark.parametrize("url,video_id", [
+    ("https://youtu.be/abc123", "abc123"),
+    ("https://www.youtube.com/watch?v=abc123&t=5", "abc123"),
+    ("https://m.youtube.com/shorts/abc123?feature=share", "abc123"),
+    ("https://www.youtube.com/live/abc123", "abc123"),
+    ("https://example.com/watch?v=abc123", None),
+])
+def test_youtube_video_id(url, video_id):
+    assert downloader.youtube_video_id(url) == video_id
+
+
+def test_youtube_audio_cache_key_is_shared_across_entry_paths():
+    search_key = downloader.telegram_media_cache_key(
+        123, "https://www.youtube.com/watch?v=abc123", "audio",
+        media_id="abc123",
+    )
+    short_link_key = downloader.telegram_media_cache_key(
+        123, "https://youtu.be/abc123?si=tracking", "audio",
+    )
+    assert search_key == short_link_key == "bot:123:ytaudio:abc123"
+
+
+def test_media_singleflight_lock_reuses_live_key():
+    first = downloader.media_singleflight_lock("same")
+    second = downloader.media_singleflight_lock("same")
+    different = downloader.media_singleflight_lock("different")
+    assert first is second
+    assert first is not different
+
+
 async def test_search_cache_reuses_normalized_query(monkeypatch):
     from bot.services import search
     calls = {"n": 0}
@@ -678,6 +710,27 @@ def test_provider_audio_conversion_produces_mp3(tmp_path):
     output = downloader._ensure_mp3(source, str(tmp_path))
     assert output.endswith(".mp3")
     assert os.path.isfile(output) and os.path.getsize(output) > 1000
+
+
+def test_telegram_native_m4a_skips_lossy_conversion(tmp_path):
+    source = tmp_path / "source.m4a"
+    source.write_bytes(b"native-audio")
+
+    output = downloader._ensure_telegram_audio(
+        str(source), str(tmp_path), max_bytes=100
+    )
+
+    assert output == str(source)
+
+
+def test_telegram_native_audio_still_obeys_output_cap(tmp_path):
+    source = tmp_path / "source.m4a"
+    source.write_bytes(b"x" * 101)
+
+    with pytest.raises(downloader.DownloadTooLarge, match="size limit"):
+        downloader._ensure_telegram_audio(
+            str(source), str(tmp_path), max_bytes=100
+        )
 
 
 # ── round video-note conversion (real ffmpeg, no network) ─

@@ -32,17 +32,11 @@ def _is_link(message: Message) -> bool:
     return _first_supported_url(message.text) is not None
 
 
-async def _fail(message: Message, status, text: str) -> None:
-    if status is not None:
-        try:
-            await status.edit_text(text)
-            return
-        except Exception:
-            pass
+async def _fail(message: Message, text: str) -> None:
     await message.answer(text)
 
 
-async def deliver_round(message: Message, src_path: str, config, _, status=None) -> None:
+async def deliver_round(message: Message, src_path: str, config, _) -> None:
     """Convert a local video file to a round note and send it."""
     note = None
     try:
@@ -54,15 +48,9 @@ async def deliver_round(message: Message, src_path: str, config, _, status=None)
         size_mb = os.path.getsize(note) / (1024 * 1024)
         if size_mb > config.max_file_mb:
             await _fail(
-                message, status,
-                _("too_big", size=round(size_mb), limit=config.max_file_mb),
+                message, _("too_big", size=round(size_mb), limit=config.max_file_mb)
             )
             return
-        if status is not None:
-            try:
-                await status.delete()
-            except Exception:
-                pass
         await message.answer_video_note(
             FSInputFile(note), length=480
         )
@@ -97,16 +85,14 @@ async def round_from_video(message: Message, _, state: FSMContext, config: Confi
     if claim_error:
         await message.answer(_(claim_error))
         return
-    status = None
     try:
-        status = await message.answer(_("round_processing"))
         os.makedirs(config.download_dir, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix=".musiqa_round_", dir=config.download_dir
         ) as work_dir:
             src = os.path.join(work_dir, "input_video")
             await bot.download(media, destination=src, timeout=300)
-            await deliver_round(message, src, config, _, status=status)
+            await deliver_round(message, src, config, _)
     except Exception as exc:
         logger.error(
             "Round conversion failed type=%s error=%s: %s",
@@ -115,7 +101,7 @@ async def round_from_video(message: Message, _, state: FSMContext, config: Confi
         )
         key = downloader.download_error_key(exc)
         await _fail(
-            message, status, _("round_failed" if key == "download_failed" else key)
+            message, _("round_failed" if key == "download_failed" else key)
         )
     finally:
         jobs.release(user_id)
@@ -133,16 +119,14 @@ async def round_from_link(message: Message, _, state: FSMContext, config: Config
     if claim_error:
         await message.answer(_(claim_error))
         return
-    status = None
     vpath = None
     try:
-        status = await message.answer(_("round_processing"))
         result = await downloader.download_video_quality(
             url, config.download_dir, 480,
             max_bytes=config.max_file_mb * 1024 * 1024,
         )
         vpath = result.path
-        await deliver_round(message, vpath, config, _, status=status)
+        await deliver_round(message, vpath, config, _)
     except Exception as exc:
         downloader.record_provider_failure(url, exc)
         logger.error(
@@ -153,7 +137,7 @@ async def round_from_link(message: Message, _, state: FSMContext, config: Config
         key = downloader.download_error_key(exc)
         if key == "download_failed":
             key = "round_failed"
-        await _fail(message, status, _(key))
+        await _fail(message, _(key))
     finally:
         if vpath and os.path.exists(vpath):
             try:

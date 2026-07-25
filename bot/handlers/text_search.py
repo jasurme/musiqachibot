@@ -10,7 +10,6 @@ import re
 from aiogram import Router
 from aiogram.types import Message
 
-from bot import jobs
 from bot.handlers.results import present
 from bot.services.search import search_tracks
 from bot.utils import is_group, is_mentioned, strip_mention
@@ -43,15 +42,8 @@ async def handle_text(message: Message, _, db, bot_username, **kwargs):
         await message.answer(_("query_too_long", limit=MAX_QUERY_LENGTH))
         return
 
-    user_id = message.from_user.id
-    claim_error = jobs.try_claim(user_id)
-    if claim_error:
-        await message.answer(_(claim_error))
-        return
-    status = None
     try:
-        status = await message.answer(_("searching"))
-        items = await search_tracks(query, limit=30)
+        items = await search_tracks(query, limit=5)
     except Exception as exc:
         from bot.services.downloader import download_error_key, safe_error_message
         logger.error(
@@ -59,17 +51,14 @@ async def handle_text(message: Message, _, db, bot_username, **kwargs):
             len(query), type(exc).__name__, safe_error_message(exc),
         )
         key = download_error_key(exc)
-        if status is not None:
-            visible = {
-                "service_busy", "download_blocked", "download_rate_limited",
-            }
-            await status.edit_text(_(key if key in visible else "generic_error"))
+        visible = {
+            "service_busy", "download_blocked", "download_rate_limited",
+        }
+        await message.answer(_(key if key in visible else "generic_error"))
         return
-    finally:
-        jobs.release(user_id)
     if not items:
-        await status.edit_text(_("no_results"))
+        await message.answer(_("no_results"))
         return
 
     header = f"<b>{html.escape(query)}</b>"
-    await present(message, _, db, header=header, items=items, per_page=10, edit=status)
+    await present(message, _, db, header=header, items=items, per_page=5)

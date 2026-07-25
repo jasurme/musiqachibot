@@ -24,18 +24,12 @@ router = Router(name="media_recognize")
 logger = logging.getLogger(__name__)
 
 
-async def _fail(message: Message, status, text: str) -> None:
-    if status is not None:
-        try:
-            await status.edit_text(text)
-            return
-        except Exception:
-            pass
+async def _fail(message: Message, text: str) -> None:
     await message.answer(text)
 
 
 async def _present_track(
-    message, _, db, track: Track, status=None,
+    message, _, db, track: Track,
     owner_user_id: int | None = None,
 ) -> None:
     header = _(
@@ -52,11 +46,6 @@ async def _present_track(
             type(exc).__name__, safe_error_message(exc),
         )
         items = []
-    if status is not None:
-        try:
-            await status.delete()
-        except Exception:
-            logger.debug("Could not delete recognition status message", exc_info=True)
     if owner_user_id is None and message.from_user and not message.from_user.is_bot:
         owner_user_id = message.from_user.id
     await present(
@@ -70,7 +59,7 @@ async def _present_track(
 
 
 async def recognize_and_present(
-    message, _, config, db, media_path, status=None, recognition_key: str | None = None,
+    message, _, config, db, media_path, recognition_key: str | None = None,
     owner_user_id: int | None = None,
 ) -> None:
     """Fingerprint local media and present a cached, provider-backed track card."""
@@ -93,7 +82,7 @@ async def recognize_and_present(
             except Exception:
                 logger.debug("Alternate recognition slice unavailable", exc_info=True)
         if not track:
-            await _fail(message, status, _("not_recognized"))
+            await _fail(message, _("not_recognized"))
             return
         if recognition_key:
             try:
@@ -104,8 +93,7 @@ async def recognize_and_present(
             except Exception:
                 logger.exception("Recognition succeeded but cache write failed")
         await _present_track(
-            message, _, db, track, status=status,
-            owner_user_id=owner_user_id,
+            message, _, db, track, owner_user_id=owner_user_id,
         )
     finally:
         for sample in samples:
@@ -130,19 +118,25 @@ async def handle_media(message: Message, _, config: Config, db, bot, **kwargs):
         )
         return
     user_id = message.from_user.id
-    claim_error = jobs.try_claim(user_id)
-    if claim_error:
-        await message.answer(_(claim_error))
-        return
-    status = None
     try:
-        status = await message.answer(_("recognizing"))
         cached = await db.get_recognition(
             media.file_unique_id, owner_user_id=user_id
         )
         if cached:
-            await _present_track(message, _, db, Track(**cached), status=status)
+            await _present_track(
+                message, _, db, Track(**cached), owner_user_id=user_id
+            )
             return
+    except Exception:
+        logger.exception("Cached media recognition delivery failed")
+        await _fail(message, _("recognition_failed"))
+        return
+
+    claim_error = jobs.try_claim(user_id)
+    if claim_error:
+        await message.answer(_(claim_error))
+        return
+    try:
         os.makedirs(config.download_dir, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix=".musiqa_recognize_", dir=config.download_dir
@@ -150,12 +144,12 @@ async def handle_media(message: Message, _, config: Config, db, bot, **kwargs):
             src = os.path.join(work_dir, "input_media")
             await bot.download(media, destination=src, timeout=300)
             await recognize_and_present(
-                message, _, config, db, src, status=status,
+                message, _, config, db, src,
                 recognition_key=media.file_unique_id,
                 owner_user_id=user_id,
             )
     except Exception:
         logger.exception("Media recognition failed type=%s", type(media).__name__)
-        await _fail(message, status, _("recognition_failed"))
+        await _fail(message, _("recognition_failed"))
     finally:
         jobs.release(user_id)

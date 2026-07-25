@@ -20,9 +20,10 @@ import sys
 import tempfile
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
 
@@ -42,6 +43,8 @@ SUPPORTED_HOSTS = (
 # its audio. The final fallback handles unusual providers that expose no 360p
 # tier; the byte guard still bounds what can actually be transferred.
 _AUDIO_FORMAT_SELECTOR = (
+    "bestaudio[ext=m4a]/"
+    "bestaudio[ext=mp3]/"
     "bestaudio/"
     "best[acodec!=none][height<=360]/"
     "worst[acodec!=none]"
@@ -68,6 +71,9 @@ _PROVIDER_TASKS: set[asyncio.Task] = set()
 _CLOSING = False
 
 _BLOCKED_UNTIL: dict[str, tuple[float, str]] = {}
+_MEDIA_LOCKS: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
 
 
 class ProviderBusy(RuntimeError):
@@ -386,6 +392,7 @@ class MediaMeta:
     duration: float | None
     thumbnail: str | None
     heights: list[int]
+    media_id: str | None = None
 
 
 _URL_IN_LOG = re.compile(r"(?:https?|socks[45]h?)://[^\s]+", re.IGNORECASE)
@@ -547,6 +554,49 @@ def provider_name(url: str) -> str:
     if host == "youtu.be" or host.endswith(".youtube.com") or host == "youtube.com":
         return "youtube"
     return host
+
+
+def youtube_video_id(url: str) -> str | None:
+    """Extract a stable public YouTube ID without treating arbitrary URLs alike."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    candidate: str | None = None
+    if host == "youtu.be":
+        candidate = parsed.path.strip("/").split("/", 1)[0]
+    elif host == "youtube.com" or host.endswith(".youtube.com"):
+        if parsed.path.rstrip("/") == "/watch":
+            candidate = (parse_qs(parsed.query).get("v") or [None])[0]
+        else:
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) >= 2 and parts[0] in {"embed", "live", "shorts"}:
+                candidate = parts[1]
+    if candidate and re.fullmatch(r"[A-Za-z0-9_-]{3,64}", candidate):
+        return candidate
+    return None
+
+
+def telegram_media_cache_key(
+    bot_id: int, url: str, quality: str, *, media_id: str | None = None,
+) -> str:
+    """Canonicalize YouTube audio so search and direct links share file_ids."""
+    if quality == "audio" and provider_name(url) == "youtube":
+        stable_id = media_id or youtube_video_id(url)
+        if stable_id:
+            # Preserve the existing namespace so deployed cache rows remain hot.
+            return f"bot:{bot_id}:ytaudio:{stable_id}"
+    return f"bot:{bot_id}:dl:{url}:{quality}"
+
+
+def media_singleflight_lock(cache_key: str) -> asyncio.Lock:
+    """Return a per-process lock coalescing identical uncached media work."""
+    lock = _MEDIA_LOCKS.get(cache_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _MEDIA_LOCKS[cache_key] = lock
+    return lock
 
 
 def provider_error_key(url: str) -> str | None:
@@ -877,6 +927,23 @@ def _ensure_mp3(
     return converted
 
 
+def _ensure_telegram_audio(
+    source: str, work_dir: str, max_bytes: int | None = None,
+    expected_duration: float | None = None,
+) -> str:
+    """Keep Telegram-native audio; transcode only incompatible containers.
+
+    Telegram accepts both MP3 and M4A for ``sendAudio``. YouTube normally
+    exposes an AAC/M4A stream, so preserving it avoids a lossy ffmpeg pass and
+    uploads fewer bytes. Providers that only expose WebM/Opus still fall back
+    to the bounded MP3 conversion above.
+    """
+    if Path(source).suffix.lower() in {".mp3", ".m4a"}:
+        _assert_output_size(source, max_bytes)
+        return source
+    return _ensure_mp3(source, work_dir, max_bytes, expected_duration)
+
+
 # ── metadata only (no download) ──────────────────────────
 async def extract_meta(url: str) -> MediaMeta:
     payload = await _run_provider_process("extract_meta", url)
@@ -907,6 +974,7 @@ def _extract_meta_sync(url: str) -> MediaMeta:
         duration=info.get("duration"),
         thumbnail=info.get("thumbnail"),
         heights=heights,
+        media_id=str(info["id"]) if info.get("id") else None,
     )
 
 
@@ -1013,14 +1081,14 @@ def _download_audio_sync(
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = _first_entry(ydl.extract_info(target, download=True))
         try:
-            source = _find_output(work_dir, ".mp3")
+            source = _find_output(work_dir, ".m4a")
         except FileNotFoundError as exc:
             if max_bytes is not None:
                 raise DownloadTooLarge(
                     "source exceeds configured size limit"
                 ) from exc
             raise
-        source = _ensure_mp3(
+        source = _ensure_telegram_audio(
             source, work_dir, max_bytes, info.get("duration")
         )
         path = _publish_output(source, out_dir, "audio")
@@ -1029,5 +1097,5 @@ def _download_audio_sync(
         title=info.get("title") or "",
         uploader=info.get("uploader") or info.get("channel") or "",
         duration=info.get("duration"),
-        ext="mp3",
+        ext=Path(path).suffix.lstrip(".").lower(),
     )

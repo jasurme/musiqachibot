@@ -40,7 +40,7 @@ challenge solver (`brew install deno` on macOS). The Docker image includes both.
 ## Build status — all core features DONE ✅
 
 - [x] **/start** welcome menu + language switch (uz / ru / en, persisted per user)
-- [x] **Feature A** — name/artist → numbered results list + ◀️▶️ paging → tap → mp3
+- [x] **Feature A** — name/artist → five direct results → tap → Telegram-ready M4A/MP3
 - [x] **Lyrics** button for recognized tracks (lyrics.ovh, free/no-key)
 - [x] **Feature C** — voice/audio/video/video-note → **recognize** (Shazamio) → album art + "Song title/Artist" header + results list + Lyrics/Video buttons
 - [x] **Feature D** — social-media link → **quality picker** (360/480/720/1080/Audio)

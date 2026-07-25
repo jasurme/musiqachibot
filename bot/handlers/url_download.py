@@ -44,9 +44,13 @@ def purge_owner(owner_user_id: int) -> None:
 
 async def _remember(
     url: str, title: str, db, owner_user_id: int | None = None,
+    media_id: str | None = None,
 ) -> str:
     token = secrets.token_urlsafe(6)
-    item = {"url": url, "title": title, "owner_user_id": owner_user_id}
+    item = {
+        "url": url, "title": title, "owner_user_id": owner_user_id,
+        "media_id": media_id,
+    }
     _PENDING[token] = item
     while len(_PENDING) > _PENDING_MAX:
         _PENDING.popitem(last=False)
@@ -80,16 +84,6 @@ def _first_supported_url(text: str | None) -> str | None:
 
 def _has_supported_url(message: Message) -> bool:
     return _first_supported_url(message.text) is not None
-
-
-async def _show_failure(message: Message, status: Message | None, text: str) -> None:
-    if status is not None:
-        try:
-            await status.edit_text(text)
-            return
-        except Exception:
-            pass
-    await message.answer(text)
 
 
 def _quality_keyboard(token: str, heights: list[int], _) -> InlineKeyboardMarkup:
@@ -136,7 +130,6 @@ async def offer_qualities(
     if blocked_key:
         await message.answer(_(blocked_key))
         return
-    status = await message.answer(_("fetching"))
     try:
         meta = await downloader.extract_meta(url)
     except Exception as exc:
@@ -146,21 +139,17 @@ async def offer_qualities(
             downloader.provider_name(url), type(exc).__name__,
             downloader.safe_error_message(exc),
         )
-        await _show_failure(
-            message, status, _(downloader.download_error_key(exc))
-        )
+        await message.answer(_(downloader.download_error_key(exc)))
         return
 
     if owner_user_id is None and message.from_user and not message.from_user.is_bot:
         owner_user_id = message.from_user.id
-    token = await _remember(meta.url, meta.title, db, owner_user_id)
+    token = await _remember(
+        meta.url, meta.title, db, owner_user_id, media_id=meta.media_id
+    )
     kb = _quality_keyboard(token, meta.heights, _)
     caption = ("🎬 " + html.escape(meta.title[:900])) if meta.title else _("choose_quality")
 
-    try:
-        await status.delete()
-    except Exception:
-        logger.debug("Could not delete metadata status message", exc_info=True)
     try:
         if meta.thumbnail:
             await message.answer_photo(meta.thumbnail, caption=caption, reply_markup=kb)
@@ -196,7 +185,10 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
     sig = f"👉 @{bot_username}"
     title = item.get("title") or ""
     video_caption = (f"🎬 {html.escape(title[:900])}\n\n{sig}") if title else sig
-    cache_key = f"bot:{callback.bot.id}:dl:{item['url']}:{quality}"
+    cache_key = downloader.telegram_media_cache_key(
+        callback.bot.id, item["url"], quality, media_id=item.get("media_id")
+    )
+    acknowledged = False
 
     # Cached Telegram file_ids need no source access. Serve them even while the
     # provider circuit is cooling down, and do not occupy an expensive-job slot.
@@ -208,6 +200,10 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
             await callback.answer(_("generic_error"), show_alert=True)
             return
         if cached:
+            # Stop Telegram's callback spinner before even a cached file send;
+            # delivery can still take noticeable time for the client.
+            await callback.answer()
+            acknowledged = True
             try:
                 if quality == "audio":
                     await callback.message.answer_audio(cached, caption=sig)
@@ -219,32 +215,37 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                     await db.delete_cached_audio(cache_key)
                 except Exception as exc:
                     logger.error("Media cache eviction failed error=%s", type(exc).__name__)
-                    await callback.answer(_("generic_error"), show_alert=True)
+                    await callback.message.answer(_("generic_error"))
                     return
             except Exception as exc:
                 logger.error("Cached media delivery failed error=%s", type(exc).__name__)
-                await callback.answer(_("generic_error"), show_alert=True)
+                await callback.message.answer(_("generic_error"))
                 return
             else:
-                await callback.answer()
                 return
 
     blocked_key = downloader.provider_error_key(item["url"])
     if blocked_key:
-        await callback.answer(_(blocked_key), show_alert=True)
+        if acknowledged:
+            await callback.message.answer(_(blocked_key))
+        else:
+            await callback.answer(_(blocked_key), show_alert=True)
         return
 
     user_id = callback.from_user.id
     claim_error = jobs.try_claim(user_id)
     if claim_error:
-        await callback.answer(_(claim_error), show_alert=True)
+        if acknowledged:
+            await callback.message.answer(_(claim_error))
+        else:
+            await callback.answer(_(claim_error), show_alert=True)
         return
 
     try:
-        await callback.answer()
+        if not acknowledged:
+            await callback.answer()
         # "Find music" — fingerprint the song playing in the video, then present it
         if quality == "music":
-            status = await callback.message.answer(_("recognizing"))
             audio_path: str | None = None
             try:
                 result = await downloader.download_audio(
@@ -254,7 +255,7 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                 audio_path = result.path
                 from bot.handlers.media_recognize import recognize_and_present
                 await recognize_and_present(
-                    callback.message, _, config, db, audio_path, status=status,
+                    callback.message, _, config, db, audio_path,
                     owner_user_id=callback.from_user.id,
                 )
             except Exception as exc:
@@ -267,7 +268,7 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                 key = downloader.download_error_key(exc)
                 if key == "download_failed":
                     key = "generic_error"
-                await _show_failure(callback.message, status, _(key))
+                await callback.message.answer(_(key))
             finally:
                 if audio_path and os.path.exists(audio_path):
                     try:
@@ -278,7 +279,6 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
 
         # "Yumaloq video" — convert the video into a round video-note
         if quality == "round":
-            status = await callback.message.answer(_("round_processing"))
             vpath: str | None = None
             try:
                 result = await downloader.download_video_quality(
@@ -287,7 +287,7 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                 )
                 vpath = result.path
                 from bot.handlers.round import deliver_round
-                await deliver_round(callback.message, vpath, config, _, status=status)
+                await deliver_round(callback.message, vpath, config, _)
             except Exception as exc:
                 downloader.record_provider_failure(item["url"], exc)
                 logger.error(
@@ -298,7 +298,7 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                 key = downloader.download_error_key(exc)
                 if key == "download_failed":
                     key = "round_failed"
-                await _show_failure(callback.message, status, _(key))
+                await callback.message.answer(_(key))
             finally:
                 if vpath and os.path.exists(vpath):
                     try:
@@ -306,9 +306,6 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                     except OSError:
                         pass
             return
-
-        label = _("btn_audio") if quality == "audio" else f"{quality}p"
-        status = await callback.message.answer(_("downloading_quality", quality=label))
 
         path: str | None = None
         stage = "provider"
@@ -328,7 +325,7 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
 
             size_mb = os.path.getsize(path) / (1024 * 1024)
             if size_mb > config.max_file_mb:
-                await status.edit_text(
+                await callback.message.answer(
                     _("too_big", size=round(size_mb), limit=config.max_file_mb)
                 )
                 return
@@ -350,10 +347,6 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                     await db.set_cached_audio(cache_key, file_id, title)
                 except Exception:
                     logger.exception("Media delivered but cache write failed key=%s", cache_key)
-            try:
-                await status.delete()
-            except Exception:
-                logger.debug("Could not delete download status message", exc_info=True)
         except Exception as exc:
             if stage == "provider":
                 downloader.record_provider_failure(item["url"], exc)
@@ -367,7 +360,7 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                 downloader.download_error_key(exc)
                 if stage == "provider" else "upload_failed"
             )
-            await _show_failure(callback.message, status, _(key))
+            await callback.message.answer(_(key))
         finally:
             if path and os.path.exists(path):
                 try:

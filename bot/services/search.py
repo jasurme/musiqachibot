@@ -5,6 +5,7 @@ The video id is kept so a pick downloads that *exact* track — no re-search.
 Recognized tracks reuse the same search path before offering download buttons.
 """
 import asyncio
+import logging
 import os
 import re
 import time
@@ -21,6 +22,7 @@ from bot.services.downloader import (
 )
 
 _YOUTUBE_PROVIDER_URL = "https://www.youtube.com/"
+logger = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -33,7 +35,7 @@ def _env_int(name: str, default: int, minimum: int = 0) -> int:
 # Skip search hits longer than this — full albums / compilations / long live sets
 # blow past Telegram's 50 MB upload cap. ~20 min keeps even long songs/remixes.
 MAX_TRACK_SECONDS = _env_int("SEARCH_MAX_SECONDS", 1200)
-SEARCH_CACHE_SECONDS = _env_int("SEARCH_CACHE_SECONDS", 300)
+SEARCH_CACHE_SECONDS = _env_int("SEARCH_CACHE_SECONDS", 3600)
 _CACHE_MAX = 256
 _CACHE: "OrderedDict[tuple[str, int], tuple[float, list[SearchItem]]]" = OrderedDict()
 _INFLIGHT: dict[tuple[str, int], asyncio.Task] = {}
@@ -69,7 +71,8 @@ def _clean_title(title: str | None) -> str:
     return t
 
 
-async def search_tracks(query: str, limit: int = 30) -> list[SearchItem]:
+async def search_tracks(query: str, limit: int = 5) -> list[SearchItem]:
+    started = time.perf_counter()
     normalized = " ".join((query or "").split()).casefold()
     limit = max(1, min(int(limit), 30))
     key = (normalized, limit)
@@ -77,7 +80,12 @@ async def search_tracks(query: str, limit: int = 30) -> list[SearchItem]:
     cached = _CACHE.get(key)
     if cached and cached[0] > now:
         _CACHE.move_to_end(key)
-        return list(cached[1])
+        items = list(cached[1])
+        logger.info(
+            "music search cache_hit=true shared_inflight=false results=%s duration_ms=%s",
+            len(items), round((time.perf_counter() - started) * 1000),
+        )
+        return items
     if cached:
         _CACHE.pop(key, None)
 
@@ -90,6 +98,7 @@ async def search_tracks(query: str, limit: int = 30) -> list[SearchItem]:
         raise yt_dlp.utils.DownloadError("YouTube provider is rate limited (HTTP 429)")
 
     task = _INFLIGHT.get(key)
+    shared_inflight = task is not None
     if task is None:
         task = asyncio.create_task(_run_search_worker(query, limit))
         _INFLIGHT[key] = task
@@ -109,6 +118,11 @@ async def search_tracks(query: str, limit: int = 30) -> list[SearchItem]:
     _CACHE.move_to_end(key)
     while len(_CACHE) > _CACHE_MAX:
         _CACHE.popitem(last=False)
+    logger.info(
+        "music search cache_hit=false shared_inflight=%s results=%s duration_ms=%s",
+        str(shared_inflight).lower(), len(items),
+        round((time.perf_counter() - started) * 1000),
+    )
     return list(items)
 
 
