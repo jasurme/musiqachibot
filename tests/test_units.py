@@ -202,6 +202,39 @@ def test_ytdlp_options_suppress_terminal_progress():
     assert opts["retries"] >= 3
 
 
+def test_audio_fallback_never_selects_unrestricted_full_video():
+    assert downloader._AUDIO_FORMAT_SELECTOR == (
+        "bestaudio/"
+        "best[acodec!=none][height<=360]/"
+        "worst[acodec!=none]"
+    )
+
+
+def test_cookie_mode_ignores_forced_player_clients(monkeypatch, tmp_path):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    monkeypatch.setenv("YTDLP_COOKIES_FILE", str(cookies))
+    monkeypatch.setenv("YTDLP_PLAYER_CLIENT", "tv,web_safari,android")
+
+    opts = downloader._net_opts()
+
+    assert opts["cookiefile"] == str(cookies)
+    assert "extractor_args" not in opts
+    assert any(
+        "YTDLP_PLAYER_CLIENT is ignored" in warning
+        for warning in downloader.runtime_warnings()
+    )
+
+
+def test_cookieless_mode_can_use_explicit_player_clients(monkeypatch):
+    monkeypatch.delenv("YTDLP_COOKIES_FILE", raising=False)
+    monkeypatch.setenv("YTDLP_PLAYER_CLIENT", "tv, web_safari")
+
+    assert downloader._net_opts()["extractor_args"] == {
+        "youtube": {"player_client": ["tv", "web_safari"]}
+    }
+
+
 def test_provider_log_redaction_removes_secret_url_paths():
     message = downloader.safe_error_message(
         "failed https://api.telegram.org/file/bot123456:secret/audio/file.mp3?sig=x"
@@ -221,6 +254,37 @@ def test_streaming_source_guard_sums_separate_formats():
     guard({"status": "downloading", "filename": "video", "downloaded_bytes": 60})
     with pytest.raises(downloader.DownloadTooLarge):
         guard({"status": "downloading", "filename": "audio", "downloaded_bytes": 41})
+
+
+def test_streaming_source_guard_does_not_trust_fragment_size_estimates():
+    opts = downloader._source_limit_opts(100)
+    guard = opts["progress_hooks"][0]
+
+    # FragmentDownloader extrapolates this value from the fragments received
+    # so far. A large initial fragment can make the estimate much larger than
+    # the eventual media file, so only bytes actually transferred are counted.
+    guard({
+        "status": "downloading", "filename": "audio",
+        "downloaded_bytes": 20, "total_bytes_estimate": 500,
+    })
+    guard({
+        "status": "finished", "filename": "audio",
+        "downloaded_bytes": 100, "total_bytes_estimate": 500,
+    })
+    with pytest.raises(downloader.DownloadTooLarge):
+        guard({
+            "status": "downloading", "filename": "audio",
+            "downloaded_bytes": 101, "total_bytes_estimate": 500,
+        })
+
+
+def test_streaming_source_guard_rejects_known_oversized_content_length():
+    guard = downloader._source_limit_opts(100)["progress_hooks"][0]
+    with pytest.raises(downloader.DownloadTooLarge):
+        guard({
+            "status": "downloading", "filename": "audio",
+            "downloaded_bytes": 1, "total_bytes": 101,
+        })
 
 
 async def test_provider_admission_rejects_an_unbounded_queue(monkeypatch):

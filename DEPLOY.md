@@ -65,6 +65,10 @@ cookie export procedure. Cookies are not a guaranteed fix for a blocked IP:
 6. Confirm startup logs contain `yt-dlp auth configuration: cookies=True`; this
    confirms a readable file was loaded, not that YouTube will accept the session.
 
+Delete `YTDLP_PLAYER_CLIENT` when cookies are configured. The application ignores
+that override in authenticated mode so yt-dlp can dynamically select clients that
+support cookies; forcing Android/TV/browser clients can hide usable audio formats.
+
 YouTube may rotate cookies when that browser session is reopened. If fresh cookies
 still fail, the Railway IP itself may be challenged; configure `YTDLP_PROXY` with
 an authorized, stable endpoint whose egress is not blocked. A proxy category alone

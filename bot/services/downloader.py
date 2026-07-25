@@ -36,6 +36,17 @@ SUPPORTED_HOSTS = (
     "twitter.com", "x.com",
 )
 
+# Prefer a true audio-only stream. If a YouTube client exposes only combined
+# streams (for example during a SABR experiment), use a low-resolution stream
+# rather than downloading an unrestricted full-quality video just to extract
+# its audio. The final fallback handles unusual providers that expose no 360p
+# tier; the byte guard still bounds what can actually be transferred.
+_AUDIO_FORMAT_SELECTOR = (
+    "bestaudio/"
+    "best[acodec!=none][height<=360]/"
+    "worst[acodec!=none]"
+)
+
 
 def _worker_count() -> int:
     raw = (os.getenv("YTDLP_CONCURRENCY") or "3").strip()
@@ -484,6 +495,14 @@ def runtime_warnings() -> list[str]:
     cookie_file = os.getenv("YTDLP_COOKIES_FILE")
     if cookie_file and not os.path.isfile(cookie_file):
         warnings.append(f"YTDLP_COOKIES_FILE does not exist: {cookie_file}")
+    if (
+        cookie_file and os.path.isfile(cookie_file)
+        and os.getenv("YTDLP_PLAYER_CLIENT")
+    ):
+        warnings.append(
+            "YTDLP_PLAYER_CLIENT is ignored while cookies are configured; "
+            "remove the override and let yt-dlp select cookie-compatible clients"
+        )
     on_railway = any(
         os.getenv(name)
         for name in ("RAILWAY_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME", "RAILWAY_PROJECT_ID")
@@ -576,11 +595,13 @@ def _net_opts() -> dict:
     proxy = os.getenv("YTDLP_PROXY")
     if proxy:
         opts["proxy"] = proxy
-    # On datacenter IPs YouTube may withhold formats ("Requested format is not
-    # available"). Trying alternate player clients often restores them.
-    # e.g. YTDLP_PLAYER_CLIENT="tv,web_safari,android"
+    # This advanced override is intentionally disabled with cookies. yt-dlp's
+    # authenticated client set changes over time and it dynamically excludes
+    # clients that cannot use cookies; overriding it caused missing formats in
+    # production. A cookieless deployment may still follow current upstream
+    # guidance and opt into a specific client.
     clients = os.getenv("YTDLP_PLAYER_CLIENT")
-    if clients:
+    if clients and "cookiefile" not in opts:
         opts["extractor_args"] = {
             "youtube": {"player_client": [c.strip() for c in clients.split(",") if c.strip()]}
         }
@@ -625,8 +646,12 @@ def _base_opts() -> dict:
 def _source_limit_opts(max_bytes: int | None) -> dict:
     """Bound known and streaming source bytes before post-download size checks.
 
-    yt-dlp's max_filesize handles known sizes. The hook is defense in depth for
-    manifests/unknown sizes and sums separate video+audio streams.
+    yt-dlp's max_filesize handles known HTTP content lengths. The hook is
+    defense in depth for manifests/unknown sizes and sums separate video+audio
+    streams. Fragment download estimates are deliberately not treated as hard
+    limits: yt-dlp extrapolates them from the fragments downloaded so far, and
+    an unusually large initial fragment can substantially overestimate a small
+    final file.
     """
     if max_bytes is None:
         return {}
@@ -638,11 +663,13 @@ def _source_limit_opts(max_bytes: int | None) -> dict:
     def guard(progress: dict) -> None:
         if progress.get("status") not in {"downloading", "finished"}:
             return
-        expected = progress.get("total_bytes") or progress.get("total_bytes_estimate")
-        if expected and int(expected) > limit:
+        known_total = progress.get("total_bytes")
+        if known_total and int(known_total) > limit:
             raise DownloadTooLarge("source exceeds configured size limit")
         filename = str(progress.get("filename") or progress.get("tmpfilename") or "stream")
-        current = progress.get("downloaded_bytes") or expected or 0
+        current = progress.get("downloaded_bytes")
+        if current is None:
+            current = known_total or 0
         seen[filename] = max(seen.get(filename, 0), int(current))
         if sum(seen.values()) > limit:
             raise DownloadTooLarge("source exceeds configured size limit")
@@ -978,7 +1005,7 @@ def _download_audio_sync(
             **_base_opts(),
             **_source_limit_opts(max_bytes),
             "outtmpl": os.path.join(work_dir, "%(id)s.%(ext)s"),
-            "format": "bestaudio/best",
+            "format": _AUDIO_FORMAT_SELECTOR,
             "noplaylist": True,
             "match_filter": _reject_unbounded_media,
             "restrictfilenames": True,
