@@ -5,6 +5,7 @@ import stat
 import subprocess
 import sys
 import time
+import tomllib
 from dataclasses import replace
 from pathlib import Path
 
@@ -727,6 +728,17 @@ def test_deployment_includes_current_youtube_solver_runtime():
     assert entrypoint.index("install -d /data /data/downloads") < entrypoint.index(
         "chown 101:101 /data /data/downloads"
     )
+
+
+def test_railway_deploy_durations_are_numeric():
+    root = Path(__file__).resolve().parent.parent
+    with (root / "railway.toml").open("rb") as config_file:
+        deploy = tomllib.load(config_file)["deploy"]
+
+    assert deploy["overlapSeconds"] == 0
+    assert deploy["drainingSeconds"] == 15
+    assert type(deploy["overlapSeconds"]) is int
+    assert type(deploy["drainingSeconds"]) is int
 
 
 # ── quality keyboard (Feature D) ─────────────────────────
