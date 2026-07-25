@@ -8,8 +8,9 @@ from bot.i18n import DEFAULT, SUPPORTED, t
 
 
 class I18nMiddleware(BaseMiddleware):
-    def __init__(self, db):
+    def __init__(self, db, default_locale: str = DEFAULT):
         self.db = db
+        self.default_locale = default_locale if default_locale in SUPPORTED else DEFAULT
 
     async def __call__(
         self,
@@ -18,7 +19,7 @@ class I18nMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user = data.get("event_from_user")
-        locale = DEFAULT  # first-time users default to Uzbek
+        locale = self.default_locale
         if user is not None:
             stored = await self.db.get_locale(user.id)
             if stored in SUPPORTED:

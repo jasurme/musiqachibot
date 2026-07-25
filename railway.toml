@@ -1,8 +1,12 @@
-# Railway build/deploy config. Forces the Dockerfile builder (deterministic)
-# and restarts the worker on failure.
+# Railway build/deploy config. Forces the tested Dockerfile builder and
+# restarts the worker on failure.
 [build]
 builder = "DOCKERFILE"
 
 [deploy]
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
+# A polling bot must not have old and new deployments consuming getUpdates at
+# the same time. Give aiogram a short SIGTERM window to close DB/HTTP resources.
+overlapSeconds = "0"
+drainingSeconds = "15"

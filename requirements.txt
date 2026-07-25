@@ -1,16 +1,13 @@
 # Core bot
-aiogram>=3.13,<4
-aiosqlite>=0.20
-python-dotenv>=1.0
-aiohttp>=3.10
+aiogram==3.30.0
+aiosqlite==0.22.1
+python-dotenv==1.2.2
+aiohttp==3.14.3
 
 # Feature D — downloading (Instagram / TikTok / YouTube)
-yt-dlp
-
-# Feature A/B — search metadata & lyrics (wired in later steps)
-spotipy>=2.24
-lyricsgenius>=3.2
-mutagen>=1.47
+# Keep this tested security release pinned. The [default] extra installs the
+# matching yt-dlp-ejs challenge solver required for current YouTube support.
+yt-dlp[default]==2026.7.4
 
 # Feature C — recognition (free, unofficial Shazam)
-shazamio>=0.7
+shazamio==0.8.1

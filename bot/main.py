@@ -9,7 +9,8 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 
-from bot.config import load_config
+from bot.config import Config, load_config
+from bot import jobs
 from bot.db.storage import Storage
 from bot.handlers import (
     media_recognize,
@@ -20,6 +21,12 @@ from bot.handlers import (
     url_download,
 )
 from bot.middlewares.i18n import I18nMiddleware
+from bot.i18n import SUPPORTED, t
+from bot.services.downloader import (
+    cleanup_stale_runtime_files,
+    runtime_warnings,
+    shutdown_provider_workers,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,80 +35,157 @@ logging.basicConfig(
 logger = logging.getLogger("musiqa")
 
 
-def _materialize_cookies() -> None:
+def _build_telegram_session(config: Config) -> AiohttpSession:
+    if config.local_api_url:
+        return AiohttpSession(
+            api=TelegramAPIServer.from_base(
+                config.local_api_url, is_local=True
+            ),
+            timeout=300,
+        )
+    return AiohttpSession(timeout=300)
+
+
+def _materialize_cookies() -> str | None:
     """Railway/cloud hosts expose string env vars, not files. If cookies are
     provided as YTDLP_COOKIES_CONTENT, write them to a file and point
     YTDLP_COOKIES_FILE at it so yt-dlp can use them."""
     content = os.getenv("YTDLP_COOKIES_CONTENT")
-    if content and not os.getenv("YTDLP_COOKIES_FILE"):
-        path = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
+    configured_file = os.getenv("YTDLP_COOKIES_FILE")
+    if content and (not configured_file or not os.path.isfile(configured_file)):
+        if configured_file:
+            logger.warning(
+                "YTDLP_COOKIES_FILE does not exist; using "
+                "YTDLP_COOKIES_CONTENT instead"
+            )
+        normalized = content.lstrip("\ufeff\r\n ")
+        first_line = normalized.splitlines()[0] if normalized else ""
+        if first_line not in {"# HTTP Cookie File", "# Netscape HTTP Cookie File"}:
+            logger.warning(
+                "YTDLP_COOKIES_CONTENT is not a Netscape cookie export; "
+                "YouTube authentication will probably fail"
+            )
+        path = None
         try:
-            with open(path, "w") as f:
-                f.write(content)
+            fd, path = tempfile.mkstemp(prefix="musiqa_yt_cookies_", suffix=".txt")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(normalized)
             os.environ["YTDLP_COOKIES_FILE"] = path
             logger.info("Loaded YouTube cookies from YTDLP_COOKIES_CONTENT")
+            return path
         except OSError as exc:
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
             logger.warning("could not write cookies file: %s", exc)
+    return None
 
 
-async def _set_commands(bot: Bot) -> None:
+async def _set_commands(bot: Bot, default_locale: str) -> None:
     from aiogram.types import BotCommand
-    commands = [
-        BotCommand(command="start", description="Boshlash / Start"),
-        BotCommand(command="round", description="⭕ Videoni yumaloq qilish"),
-        BotCommand(command="lang", description="🌐 Til / Language"),
-    ]
+
+    def commands(locale: str) -> list[BotCommand]:
+        return [
+            BotCommand(command="start", description=t("cmd_start", locale)),
+            BotCommand(command="round", description=t("cmd_round", locale)),
+            BotCommand(command="lang", description=t("cmd_lang", locale)),
+            BotCommand(command="privacy", description=t("cmd_privacy", locale)),
+            BotCommand(
+                command="delete_my_data",
+                description=t("cmd_delete_my_data", locale),
+            ),
+        ]
+
     try:
-        await bot.set_my_commands(commands)
+        await bot.set_my_commands(commands(default_locale))
+        for locale in SUPPORTED:
+            await bot.set_my_commands(commands(locale), language_code=locale)
     except Exception as exc:  # non-fatal
         logger.warning("set_my_commands failed: %s", exc)
 
 
 async def main() -> None:
     config = load_config()
-    _materialize_cookies()
-
-    session = None
-    if config.local_api_url:
-        session = AiohttpSession(api=TelegramAPIServer.from_base(config.local_api_url))
-        logger.info("Using local Bot API server at %s", config.local_api_url)
-
-    bot = Bot(
-        token=config.bot_token,
-        session=session,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-
-    storage = Storage(config.db_path)
-    await storage.init()
-
-    dp = Dispatcher()
-    dp["db"] = storage
-    dp["config"] = config
-
-    i18n = I18nMiddleware(storage)
-    dp.message.middleware(i18n)
-    dp.callback_query.middleware(i18n)
-
-    # order matters: round (state-filtered) first, URL before the catch-all text
-    dp.include_router(round_handler.router)
-    dp.include_router(start.router)
-    dp.include_router(url_download.router)
-    dp.include_router(media_recognize.router)
-    dp.include_router(text_search.router)
-    dp.include_router(results.router)
-
-    me = await bot.get_me()
-    dp["bot_username"] = me.username
-    logger.info("Bot @%s (id=%s) starting long polling...", me.username, me.id)
-
+    jobs.configure(config.heavy_job_concurrency)
+    materialized_cookie = _materialize_cookies()
+    session: AiohttpSession | None = None
+    bot: Bot | None = None
+    storage: Storage | None = None
     try:
-        await _set_commands(bot)
-        await bot.delete_webhook(drop_pending_updates=True)
+        removed = cleanup_stale_runtime_files(config.download_dir)
+        if removed:
+            logger.info("Removed %s stale media runtime paths", removed)
+        for warning in runtime_warnings():
+            logger.warning("startup dependency check: %s", warning)
+        logger.info(
+            "yt-dlp auth configuration: cookies=%s proxy=%s",
+            bool(
+                os.getenv("YTDLP_COOKIES_FILE")
+                and os.path.isfile(os.environ["YTDLP_COOKIES_FILE"])
+            ),
+            bool(os.getenv("YTDLP_PROXY")),
+        )
+
+        session = _build_telegram_session(config)
+        if config.local_api_url:
+            logger.info("Using local Bot API server at %s", config.local_api_url)
+
+        bot = Bot(
+            token=config.bot_token,
+            session=session,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        storage = Storage(config.db_path)
+        await storage.init()
+
+        dp = Dispatcher()
+        dp["db"] = storage
+        dp["config"] = config
+
+        i18n = I18nMiddleware(storage, config.default_locale)
+        dp.message.middleware(i18n)
+        dp.callback_query.middleware(i18n)
+
+        # order matters: round (state-filtered) first, URL before catch-all text
+        dp.include_router(round_handler.router)
+        dp.include_router(start.router)
+        dp.include_router(url_download.router)
+        dp.include_router(media_recognize.router)
+        dp.include_router(text_search.router)
+        dp.include_router(results.router)
+
+        me = await bot.get_me()
+        dp["bot_username"] = me.username
+        logger.info("Bot @%s (id=%s) starting long polling...", me.username, me.id)
+
+        await _set_commands(bot, config.default_locale)
+        await bot.delete_webhook(drop_pending_updates=config.drop_pending_updates)
         await dp.start_polling(bot)
     finally:
-        await storage.close()
-        await bot.session.close()
+        try:
+            await shutdown_provider_workers()
+        except Exception as exc:
+            logger.warning("provider worker shutdown failed: %s", type(exc).__name__)
+        if storage is not None:
+            try:
+                await storage.close()
+            except Exception as exc:
+                logger.warning("database close failed: %s", type(exc).__name__)
+        try:
+            if bot is not None:
+                await bot.session.close()
+            elif session is not None:
+                await session.close()
+        except Exception as exc:
+            logger.warning("Telegram session close failed: %s", type(exc).__name__)
+        if materialized_cookie:
+            os.environ.pop("YTDLP_COOKIES_FILE", None)
+            try:
+                os.remove(materialized_cookie)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

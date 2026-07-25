@@ -3,11 +3,14 @@ with Lyrics/Video buttons and album art. Used by Feature A (search) and
 Feature C (recognition). Owns the pick / page / lyrics / video callbacks.
 """
 import html
+import logging
 import os
 import secrets
 from collections import OrderedDict
+from urllib.parse import urlparse
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     CallbackQuery,
     FSInputFile,
@@ -17,16 +20,24 @@ from aiogram.types import (
 )
 
 from bot.config import Config
+from bot import jobs
 from bot.services import downloader
 from bot.services.lyrics import fetch_lyrics
 from bot.services.search import SearchItem
 
 router = Router(name="results")
+logger = logging.getLogger(__name__)
 
 # in-memory cache in front of the DB (fast path); the DB copy survives restarts
 _SESS: "OrderedDict[str, dict]" = OrderedDict()
 _SESS_MAX = 500
 COLS = 5
+
+
+def purge_owner(owner_user_id: int) -> None:
+    for token, session in list(_SESS.items()):
+        if session.get("owner_user_id") == owner_user_id:
+            _SESS.pop(token, None)
 
 
 def _serialize(sess: dict) -> dict:
@@ -36,6 +47,8 @@ def _serialize(sess: dict) -> dict:
         "extras": sess.get("extras", False),
         "artist": sess.get("artist"),
         "title": sess.get("title"),
+        "listen_url": sess.get("listen_url"),
+        "owner_user_id": sess.get("owner_user_id"),
         "items": [
             {"video_id": it.video_id, "title": it.title,
              "duration": it.duration, "uploader": it.uploader}
@@ -54,6 +67,8 @@ def _deserialize(data: dict) -> dict:
         "header": data["header"], "per_page": data["per_page"],
         "extras": data.get("extras", False), "artist": data.get("artist"),
         "title": data.get("title"), "items": items,
+        "listen_url": data.get("listen_url"),
+        "owner_user_id": data.get("owner_user_id"),
     }
 
 
@@ -69,12 +84,15 @@ async def _remember(sess: dict, db) -> str:
 async def _get_session(token: str, db) -> dict | None:
     sess = _SESS.get(token)
     if sess is not None:
+        _SESS.move_to_end(token)
         return sess
     data = await db.get_session(token)
     if not data:
         return None
     sess = _deserialize(data)
     _SESS[token] = sess  # warm the cache
+    while len(_SESS) > _SESS_MAX:
+        _SESS.popitem(last=False)
     return sess
 
 
@@ -104,8 +122,14 @@ def _kb(token: str, sess: dict, page: int, _) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
     if sess.get("extras"):
+        listen_url = sess.get("listen_url")
+        if listen_url and urlparse(listen_url).scheme in {"http", "https"}:
+            rows.append([
+                InlineKeyboardButton(text="▶️ " + _("btn_listen"), url=listen_url)
+            ])
         rows.append([InlineKeyboardButton(text="📃 " + _("btn_lyrics"), callback_data=f"lyr:{token}")])
-        rows.append([InlineKeyboardButton(text="🎬 " + _("btn_video"), callback_data=f"vid:{token}")])
+        if items:
+            rows.append([InlineKeyboardButton(text="🎬 " + _("btn_video"), callback_data=f"vid:{token}")])
 
     nums = [
         InlineKeyboardButton(text=str(start + i + 1), callback_data=f"pick:{token}:{start + i}")
@@ -127,13 +151,19 @@ async def present(
     message: Message, _, db, *, header: str, items: list,
     per_page: int = 10, thumbnail: str | None = None,
     extras: bool = False, artist: str | None = None, title: str | None = None,
+    listen_url: str | None = None,
+    owner_user_id: int | None = None,
     edit: Message | None = None,
 ) -> None:
     """Render the results list. `edit` reuses a status message (search flow);
     `thumbnail` sends album art with the list as caption (recognition flow)."""
+    if owner_user_id is None and message.from_user and not message.from_user.is_bot:
+        owner_user_id = message.from_user.id
     sess = {
         "header": header, "items": items, "per_page": per_page,
         "extras": extras, "artist": artist, "title": title,
+        "listen_url": listen_url,
+        "owner_user_id": owner_user_id,
     }
     token = await _remember(sess, db)
     text = _list_text(sess, 0)
@@ -158,52 +188,111 @@ async def on_pick(callback: CallbackQuery, _, config: Config, db, bot_username: 
     except ValueError:
         await callback.answer()
         return
+    if not idx.isdecimal():
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
     sess = await _get_session(token, db)
     if not sess:
         await callback.answer(_("link_expired"), show_alert=True)
         return
+    if sess.get("owner_user_id") not in {None, callback.from_user.id}:
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
     idx = int(idx)
     items = sess["items"]
-    if idx >= len(items):
-        await callback.answer()
+    if not 0 <= idx < len(items):
+        await callback.answer(_("invalid_action"), show_alert=True)
         return
     item = items[idx]
     caption = f"👉 @{bot_username}"
 
-    cache_key = f"ytaudio:{item.video_id}"
-    cached = await db.get_cached_audio(cache_key)
-    if cached:
-        await callback.answer()
-        await callback.message.answer_audio(
-            cached, caption=caption, title=item.title or None, performer=item.uploader or None
-        )
+    user_id = callback.from_user.id
+    claim_error = jobs.try_claim(user_id)
+    if claim_error:
+        await callback.answer(_(claim_error), show_alert=True)
         return
 
-    await callback.answer(_("sending_track"))
-    status = await callback.message.answer(_("sending_track"))
+    cache_key = f"bot:{callback.bot.id}:ytaudio:{item.video_id}"
+    status: Message | None = None
     path: str | None = None
+    stage = "telegram"
     try:
-        result = await downloader.download_audio(item.url, config.download_dir)
+        # Acknowledge immediately so Telegram removes the button spinner while
+        # potentially slow provider/cache work continues in one status message.
+        await callback.answer()
+        stage = "cache"
+        cached = await db.get_cached_audio(cache_key)
+        if cached:
+            try:
+                await callback.message.answer_audio(
+                    cached, caption=caption, title=item.title or None,
+                    performer=item.uploader or None,
+                )
+                return
+            except TelegramBadRequest:
+                logger.warning("Evicting invalid Telegram audio cache key=%s", cache_key)
+                await db.delete_cached_audio(cache_key)
+
+        blocked_key = downloader.provider_error_key(item.url)
+        if blocked_key:
+            await callback.message.answer(_(blocked_key))
+            return
+
+        status = await callback.message.answer(_("sending_track"))
+        stage = "provider"
+        result = await downloader.download_audio(
+            item.url, config.download_dir,
+            max_bytes=config.max_file_mb * 1024 * 1024,
+        )
         path = result.path
+        stage = "upload"
         size_mb = os.path.getsize(path) / (1024 * 1024)
         if size_mb > config.max_file_mb:
-            await status.edit_text(_("too_big", size=round(size_mb)))
+            await status.edit_text(
+                _("too_big", size=round(size_mb), limit=config.max_file_mb)
+            )
             return
         sent = await callback.message.answer_audio(
             FSInputFile(path), caption=caption,
             title=result.title or item.title, performer=result.uploader or item.uploader,
         )
         if sent.audio:
-            await db.set_cached_audio(cache_key, sent.audio.file_id, item.title)
-        await status.delete()
-    except Exception:
-        await status.edit_text(_("download_failed"))
+            try:
+                await db.set_cached_audio(cache_key, sent.audio.file_id, item.title)
+            except Exception:
+                logger.exception("Audio delivered but cache write failed key=%s", cache_key)
+        try:
+            await status.delete()
+        except Exception:
+            logger.debug("Could not delete track status message", exc_info=True)
+    except Exception as exc:
+        if stage == "provider":
+            downloader.record_provider_failure(item.url, exc)
+        logger.error(
+            "Track delivery failed video_id=%s stage=%s error=%s: %s",
+            item.video_id, stage, type(exc).__name__,
+            downloader.safe_error_message(exc),
+        )
+        if stage == "provider":
+            failure = _(downloader.download_error_key(exc))
+        elif stage == "upload":
+            failure = _("upload_failed")
+        else:
+            failure = _("generic_error")
+        if status is not None:
+            try:
+                await status.edit_text(failure)
+            except Exception:
+                await callback.message.answer(failure)
+        else:
+            await callback.message.answer(failure)
     finally:
         if path and os.path.exists(path):
             try:
                 os.remove(path)
             except OSError:
                 pass
+        jobs.release(user_id)
 
 
 @router.callback_query(F.data.startswith("page:"))
@@ -213,11 +302,21 @@ async def on_page(callback: CallbackQuery, _, db, **kwargs):
     except ValueError:
         await callback.answer()
         return
+    if not page.isdecimal():
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
     sess = await _get_session(token, db)
     if not sess:
         await callback.answer()
         return
+    if sess.get("owner_user_id") not in {None, callback.from_user.id}:
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
     page = int(page)
+    page_count = (len(sess["items"]) + sess["per_page"] - 1) // sess["per_page"]
+    if not 0 <= page < page_count:
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
     try:
         await callback.message.edit_text(_list_text(sess, page), reply_markup=_kb(token, sess, page, _))
     except Exception:
@@ -231,6 +330,9 @@ async def on_lyrics(callback: CallbackQuery, _, db, **kwargs):
     sess = await _get_session(token, db)
     if not sess:
         await callback.answer(_("link_expired"), show_alert=True)
+        return
+    if sess.get("owner_user_id") not in {None, callback.from_user.id}:
+        await callback.answer(_("invalid_action"), show_alert=True)
         return
     await callback.answer(_("searching"))
     text = await fetch_lyrics(sess.get("artist") or "", sess.get("title") or "")
@@ -248,6 +350,12 @@ async def on_video(callback: CallbackQuery, _, db, **kwargs):
     if not sess or not sess["items"]:
         await callback.answer(_("link_expired"), show_alert=True)
         return
+    if sess.get("owner_user_id") not in {None, callback.from_user.id}:
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
     await callback.answer()
     from bot.handlers.url_download import offer_qualities  # lazy: avoid import cycle
-    await offer_qualities(callback.message, sess["items"][0].url, _, db)
+    await offer_qualities(
+        callback.message, sess["items"][0].url, _, db,
+        owner_user_id=callback.from_user.id,
+    )

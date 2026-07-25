@@ -40,11 +40,24 @@ async def test_download_audio_real(tmp_path):
         size_mb = os.path.getsize(res.path) / (1024 * 1024)
         assert 0.1 < size_mb < 50
         return
+    if os.getenv("STRICT_NETWORK_TESTS") == "1":
+        pytest.fail(f"YouTube blocked every download candidate: {last_err}")
     pytest.skip(f"YouTube rate-limited/blocked all candidates: {last_err}")
 
 
 async def test_recognize_real(tmp_path):
-    res = await downloader.download_audio_by_query("PSY Gangnam Style official", str(tmp_path))
+    items = await search_tracks("PSY Gangnam Style official audio", limit=8)
+    res = None
+    last_err = None
+    for item in items[:6]:
+        try:
+            res = await downloader.download_audio(item.url, str(tmp_path))
+        except Exception as exc:  # noqa: BLE001 - providers can reject one result
+            last_err = exc
+            continue
+        break
+    if res is None:
+        pytest.fail(f"Could not obtain recognition sample: {last_err}")
     sample = await audio_svc.make_sample(res.path, str(tmp_path), seconds=12)
     track = await ShazamioRecognizer().recognize(sample)
     assert track is not None

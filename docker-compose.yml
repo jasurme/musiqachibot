@@ -1,21 +1,68 @@
-# OPTIONAL — only needed for files > 20 MB download / 50 MB upload.
-# For local-first dev with small files (TikTok/IG clips, mp3s) you can skip this
-# and just run `python -m bot.main`. Bring this up when Feature D/C hit big files.
-#
-#   docker compose up -d telegram-bot-api
-#   then set LOCAL_BOT_API_URL=http://localhost:8081 in .env
+# OPTIONAL full local-mode stack for files above the standard 20/50 MB limits.
+# The bot shares the Bot API state volume because --local getFile returns absolute
+# paths. Do not run a second `make run` poller alongside this stack.
 services:
-  telegram-bot-api:
-    image: aiogram/telegram-bot-api:latest
+  bot:
+    build: .
     environment:
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN is required}
+      LOCAL_BOT_API_URL: http://telegram-bot-api:8081
+      DB_PATH: /data/musiqa.db
+      DOWNLOAD_DIR: /data/downloads
+      DEFAULT_LOCALE: ${DEFAULT_LOCALE:-uz}
+      MAX_FILE_MB: ${MAX_FILE_MB:-50}
+      MAX_INPUT_MB: ${MAX_INPUT_MB:-20}
+      DROP_PENDING_UPDATES: ${DROP_PENDING_UPDATES:-false}
+      PRIVACY_POLICY_URL: ${PRIVACY_POLICY_URL:-}
+      SEARCH_MAX_SECONDS: ${SEARCH_MAX_SECONDS:-1200}
+      SEARCH_CACHE_SECONDS: ${SEARCH_CACHE_SECONDS:-300}
+      AUDD_TOKEN: ${AUDD_TOKEN:-}
+      YTDLP_COOKIES_CONTENT: ${YTDLP_COOKIES_CONTENT:-}
+      YTDLP_PROXY: ${YTDLP_PROXY:-}
+      YTDLP_PLAYER_CLIENT: ${YTDLP_PLAYER_CLIENT:-}
+      YTDLP_CONCURRENCY: ${YTDLP_CONCURRENCY:-3}
+      HEAVY_JOB_CONCURRENCY: ${HEAVY_JOB_CONCURRENCY:-3}
+      YTDLP_SLEEP_REQUESTS: ${YTDLP_SLEEP_REQUESTS:-0}
+      YTDLP_JOB_TIMEOUT_SECONDS: ${YTDLP_JOB_TIMEOUT_SECONDS:-600}
+      YTDLP_METADATA_TIMEOUT_SECONDS: ${YTDLP_METADATA_TIMEOUT_SECONDS:-90}
+      DOWNLOAD_MAX_SECONDS: ${DOWNLOAD_MAX_SECONDS:-1800}
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
+      - bot-data:/data
+    depends_on:
+      telegram-bot-api:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETPCAP
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api@sha256:1c73168d16ef2633bcc88d3e4ad0b35ed6d09885d834cb7a66d19c3fbc5dd571
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?TELEGRAM_API_ID is required}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required}
       TELEGRAM_LOCAL: 1
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8081"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
     restart: unless-stopped
 
 volumes:
   telegram-bot-api-data:
+  bot-data:

@@ -1,7 +1,9 @@
 # Secrets — NEVER commit
-.env
-*.session
-cookies.txt
+.env*
+!.env.example
+*.session*
+cookies*.txt
+*.cookies.txt
 
 # Python
 .venv/
@@ -15,6 +17,12 @@ downloads/
 *.db
 *.sqlite3
 *.log
+.musiqa_bot.pid
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # OS / editor
 .DS_Store

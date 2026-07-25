@@ -2,20 +2,41 @@
 
 Flat search returns titles + durations + video ids fast (no per-video calls).
 The video id is kept so a pick downloads that *exact* track — no re-search.
-Feature B (lyrics) will resolve a lyric snippet to a query, then reuse this.
+Recognized tracks reuse the same search path before offering download buttons.
 """
 import asyncio
 import os
 import re
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import yt_dlp
 
-from bot.services.downloader import _net_opts
+from bot.services.downloader import (
+    _base_opts,
+    _run_provider_process,
+    provider_error_key,
+    record_provider_failure,
+)
+
+_YOUTUBE_PROVIDER_URL = "https://www.youtube.com/"
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    raw = (os.getenv(name) or str(default)).strip()
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
 
 # Skip search hits longer than this — full albums / compilations / long live sets
 # blow past Telegram's 50 MB upload cap. ~20 min keeps even long songs/remixes.
-MAX_TRACK_SECONDS = int(os.getenv("SEARCH_MAX_SECONDS", "1200") or "1200")
+MAX_TRACK_SECONDS = _env_int("SEARCH_MAX_SECONDS", 1200)
+SEARCH_CACHE_SECONDS = _env_int("SEARCH_CACHE_SECONDS", 300)
+_CACHE_MAX = 256
+_CACHE: "OrderedDict[tuple[str, int], tuple[float, list[SearchItem]]]" = OrderedDict()
+_INFLIGHT: dict[tuple[str, int], asyncio.Task] = {}
 
 # strip a trailing "(Official Video)/(AUDIO)/[HD]..." style tag
 _DROP = re.compile(
@@ -49,7 +70,65 @@ def _clean_title(title: str | None) -> str:
 
 
 async def search_tracks(query: str, limit: int = 30) -> list[SearchItem]:
-    return await asyncio.to_thread(_search_sync, query, limit)
+    normalized = " ".join((query or "").split()).casefold()
+    limit = max(1, min(int(limit), 30))
+    key = (normalized, limit)
+    now = time.monotonic()
+    cached = _CACHE.get(key)
+    if cached and cached[0] > now:
+        _CACHE.move_to_end(key)
+        return list(cached[1])
+    if cached:
+        _CACHE.pop(key, None)
+
+    blocked_key = provider_error_key(_YOUTUBE_PROVIDER_URL)
+    if blocked_key == "download_blocked":
+        raise yt_dlp.utils.DownloadError(
+            "YouTube provider is bot-checked; authentication or egress is required"
+        )
+    if blocked_key == "download_rate_limited":
+        raise yt_dlp.utils.DownloadError("YouTube provider is rate limited (HTTP 429)")
+
+    task = _INFLIGHT.get(key)
+    if task is None:
+        task = asyncio.create_task(_run_search_worker(query, limit))
+        _INFLIGHT[key] = task
+        task.add_done_callback(
+            lambda done, cache_key=key: (
+                _INFLIGHT.pop(cache_key, None)
+                if _INFLIGHT.get(cache_key) is done else None
+            )
+        )
+    try:
+        items = await asyncio.shield(task)
+    finally:
+        if task.done() and _INFLIGHT.get(key) is task:
+            _INFLIGHT.pop(key, None)
+
+    _CACHE[key] = (time.monotonic() + max(0, SEARCH_CACHE_SECONDS), list(items))
+    _CACHE.move_to_end(key)
+    while len(_CACHE) > _CACHE_MAX:
+        _CACHE.popitem(last=False)
+    return list(items)
+
+
+def clear_search_cache() -> None:
+    _CACHE.clear()
+    _INFLIGHT.clear()
+
+
+async def _run_search_worker(query: str, limit: int) -> list[SearchItem]:
+    try:
+        payload = await _run_provider_process("search", query, limit)
+    except Exception as exc:
+        record_provider_failure(_YOUTUBE_PROVIDER_URL, exc)
+        raise
+    if not isinstance(payload, list):
+        raise RuntimeError("provider worker returned invalid search results")
+    try:
+        return [SearchItem(**item) for item in payload if isinstance(item, dict)]
+    except TypeError as exc:
+        raise RuntimeError("provider worker returned invalid search results") from exc
 
 
 def _entries_to_items(entries, max_seconds: int = MAX_TRACK_SECONDS) -> list[SearchItem]:
@@ -75,7 +154,11 @@ def _entries_to_items(entries, max_seconds: int = MAX_TRACK_SECONDS) -> list[Sea
 
 
 def _search_sync(query: str, limit: int) -> list[SearchItem]:
-    opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
-    with yt_dlp.YoutubeDL({**opts, **_net_opts()}) as ydl:
+    query = (query or "").strip()
+    if not query:
+        return []
+    limit = max(1, min(int(limit), 30))
+    opts = {**_base_opts(), "extract_flat": True, "noplaylist": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
     return _entries_to_items(info.get("entries"))

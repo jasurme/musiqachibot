@@ -1,5 +1,9 @@
 # Building a Music-Finder Telegram Bot (like @Oxangbot) — Research & Build Plan
 
+> **Historical design note:** this captures early options, not the exact current
+> implementation. `README.md`, `.env.example`, and `DEPLOY.md` are the operational
+> source of truth. Never share bot tokens, cookies, or proxy credentials.
+
 > Goal: recreate a bot that (1) finds music by name / artist / lyrics, (2) recognizes
 > music from voice messages, videos, audio & video-notes (Shazam-style), and
 > (3) downloads videos + their audio from Instagram, TikTok, YouTube.
@@ -40,7 +44,7 @@ Build those two blocks well and every feature is a thin wrapper around them.
                       │               │              │
               ┌───────▼───────────────▼──────────────▼───────┐
               │  Cache (SQLite/Postgres + file cache)          │
-              │  + Local Bot API server (for files > 50 MB)    │
+              │  + Local Bot API (>20 MB in / >50 MB out)      │
               └────────────────────────────────────────────────┘
 ```
 
@@ -59,7 +63,7 @@ downloads are long-running, need `ffmpeg`, disk space, and a persistent process.
 | Audio processing | **ffmpeg** (system binary) | Extract audio from video, trim samples, convert to mp3, tag. |
 | Recognition | **Shazamio** (free) → **AudD**/**ACRCloud** (paid, production) | Start free, upgrade for reliability/volume. |
 | Metadata / lyrics | **Spotify Web API** + **Genius API** | Spotify = clean title/artist/cover search; Genius = lyric search. Both free. |
-| Big files (>50 MB) | **Local Bot API server** (`telegram-bot-api` in Docker) | Raises limits from 20/50 MB to **2 GB**. Essential for YouTube videos. |
+| Big files (>50 MB) | **Local Bot API server** (`telegram-bot-api` in Docker) | Allows unlimited bot downloads and uploads up to **2000 MB**. |
 | Storage/cache | **SQLite** (start) → **Postgres** (scale) | Cache `file_id`s so re-sending a known song is instant & free. |
 | Task queue (later) | **Redis + arq/Celery** | Offload heavy downloads so the bot loop stays responsive at scale. |
 | Deploy | **VPS** (Ubuntu) + **systemd** or **Docker Compose** | Persistent process, cron for cleanup. |
@@ -76,7 +80,7 @@ That breaks feature C (a user's video could be >20 MB) and feature D (a YouTube
 video is often >50 MB).
 
 **Fix: run your own Local Bot API server.** Self-hosting `telegram-bot-api`
-raises both limits to **2 GB**. You point aiogram at `http://localhost:8081`
+allows downloads without a size limit and uploads up to **2000 MB**. You point aiogram at `http://localhost:8081`
 instead of `api.telegram.org`.
 
 Steps:
@@ -128,8 +132,8 @@ Recognition options (pick one, keep the interface swappable):
 | **AudD** | 300 free reqs, then **$5 / 1000** | just an API token | Simplest API. Accepts a **direct URL** *or* file upload; `return=spotify,apple_music`. ~160 M song DB. |
 | **ACRCloud** | Tiered (free dev tier) | HMAC signing | Bigger for broadcast/custom DBs; slightly more setup. |
 
-AudD tip: you can pass the **Telegram file URL** straight to AudD's `url` param —
-no local download needed for small samples (standard endpoint max 10 MB, so trim first with ffmpeg for long videos).
+Do not pass a Telegram file URL to a third party: it contains the bot token.
+Download locally, trim a short sample, and upload only that sample to AudD.
 
 ### Feature D — download from Instagram / TikTok / YouTube
 
@@ -147,8 +151,8 @@ Real-world gotchas:
 - **Size:** enforce a max (e.g. `-f "best[filesize<1900M]"`) and rely on the
   local Bot API server for the 50 MB→2 GB headroom.
 - **Age/region-locked YouTube** → cookies again.
-- Keep `yt-dlp` auto-updating (`pip install -U yt-dlp` on a schedule) — sites
-  change and yt-dlp ships fixes almost daily.
+- Keep `yt-dlp` current through reviewed, pinned upgrades followed by offline,
+  network and container smoke tests; do not mutate production dependencies at startup.
 
 ---
 
@@ -176,7 +180,7 @@ Genius + yt-dlp. Add AudD when you need reliable recognition at volume.
 4. **Feature A (name/artist search)** — Spotify search → `yt-dlp ytsearch1` → mp3 → send. Add the `file_id` cache.
 5. **Feature B (lyrics)** — Genius search → feed result into Feature A's pipeline.
 6. **Feature C (recognition)** — ffmpeg sample extraction → Shazamio → reuse Feature A to deliver the full track. Handle voice/audio/video/video-note types.
-7. **Hardening** — rate limiting, per-user throttling, error messages (uz/ru/en), logging, temp-file cleanup cron, DB cache, admin/stats, `yt-dlp` auto-update.
+7. **Hardening** — rate limiting, per-user throttling, error messages (uz/ru/en), logging, temp-file cleanup, DB cache, admin/stats, reviewed `yt-dlp` upgrades.
 8. **Scale (only if needed)** — move heavy work to a Redis/arq worker queue; Postgres; multiple workers.
 
 ---
@@ -210,10 +214,11 @@ musiqa_bot/
 └─ README.md
 ```
 
-Starter `requirements.txt`:
+Historical starter dependency sketch (do not copy for deployment; the current
+reviewed pins and EJS support are in `requirements.txt`):
 ```
-aiogram>=3.13
-yt-dlp
+aiogram
+yt-dlp[default]  # also requires an external JS runtime such as Deno
 shazamio
 spotipy            # Spotify Web API client
 lyricsgenius       # Genius API client
@@ -229,12 +234,13 @@ python-dotenv
 
 - **VPS** (Ubuntu 22.04, ≥2 GB RAM, generous disk for temp files). Serverless
   won't work well (long downloads, ffmpeg, local Bot API server, persistent process).
-- **Docker Compose**: three services — `bot`, `telegram-bot-api` (local server),
-  optional `redis`/`postgres`.
+- A future scaled deployment could use separate bot, Local Bot API, Redis and
+  Postgres services. The repository's current Compose file only starts the
+  host-local Telegram Bot API service.
 - Run the bot under **systemd** or Docker `restart: always`.
 - **Webhook vs polling**: start with **long polling** (simplest, no public HTTPS
   needed). Switch to webhooks only at higher volume.
-- **Cron/cleanup**: delete temp media hourly; auto-update `yt-dlp` daily.
+- **Maintenance**: verify temp cleanup and schedule reviewed dependency updates.
 
 ---
 
@@ -243,9 +249,9 @@ python-dotenv
 - Downloading from YouTube/Instagram/TikTok generally **violates their ToS**, and
   redistributing copyrighted music can infringe copyright. Many similar bots
   operate in a grey area and can be taken down.
-- This is fine for **personal/educational use**; if you go public/commercial,
-  understand the legal exposure in your jurisdiction and Telegram's own rules
-  (bots get banned for abuse/DMCA).
+- Personal or educational use is not a blanket legal exception. Understand the
+  rules and legal exposure in the relevant jurisdiction before operating the bot;
+  public services can be restricted or removed after abuse/DMCA complaints.
 - Recognition APIs (AudD/ACRCloud) are fully legitimate to use.
 - Keep API keys and cookies **out of git** (`.env`, secrets manager).
 
@@ -276,11 +282,10 @@ python-dotenv
 
 ---
 
-### Immediate next step
-When you share the BotFather token, we start at **Step 1 (skeleton)** and
-**Step 2 (local Bot API server)** — a running bot that echoes and can handle
-large files — then layer features D → A → B → C on top.
-```
+### Current next step
+Deploy the tested Docker image, configure Railway secrets directly, and run a
+small production-origin canary. Never share the BotFather token, cookies or proxy
+credentials in chat.
 
 *Sources consulted:* aiogram docs & PyPI; AudD docs (`docs.audd.io`) & AudD-vs-ACRCloud;
 yt-dlp guides; Telegram Bot API + local `telegram-bot-api` (tdlib); Genius/Musixmatch/Spotify bot examples.

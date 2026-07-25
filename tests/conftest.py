@@ -28,6 +28,7 @@ from aiogram.types import (
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot.config import Config
+from bot import jobs
 from bot.db.storage import Storage
 from bot.handlers import (
     media_recognize,
@@ -105,9 +106,8 @@ async def bot(cap):
 def config(tmp_path):
     return Config(
         bot_token="x", local_api_url=None, default_locale="en",
-        download_dir=str(tmp_path), max_file_mb=50,
-        spotify_client_id=None, spotify_client_secret=None,
-        genius_token=None, audd_token=None,
+        download_dir=str(tmp_path), max_file_mb=50, max_input_mb=20,
+        audd_token=None,
     )
 
 
@@ -123,9 +123,19 @@ async def storage():
 def _clear_module_state():
     results._SESS.clear()
     url_download._PENDING.clear()
+    jobs.clear()
+    jobs.configure(3)
+    from bot.services import downloader
+    from bot.services.search import clear_search_cache
+    downloader.clear_provider_failures()
+    clear_search_cache()
     yield
     results._SESS.clear()
     url_download._PENDING.clear()
+    jobs.clear()
+    jobs.configure(3)
+    downloader.clear_provider_failures()
+    clear_search_cache()
 
 
 @pytest_asyncio.fixture
@@ -136,7 +146,7 @@ async def dp(storage, config):
     d["db"] = storage
     d["config"] = config
     d["bot_username"] = "testbot"
-    i18n = I18nMiddleware(storage)
+    i18n = I18nMiddleware(storage, config.default_locale)
     d.message.middleware(i18n)
     d.callback_query.middleware(i18n)
     for r in ALL_ROUTERS:

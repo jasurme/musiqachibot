@@ -1,15 +1,15 @@
 # 🎵 Musiqa Bot
 
-A Telegram music bot: find songs by name/artist/lyrics, recognize music from
+A Telegram music bot: find songs by name/artist, recognize music from
 voice/video/audio (Shazam-style), and download videos + audio from Instagram,
-TikTok and YouTube. UZ / RU / EN.
+TikTok, YouTube, Facebook and X. UZ / RU / EN.
 
 See [RESEARCH.md](RESEARCH.md) for the full design and rationale.
 
 ## Quick start (local dev)
 
 ```bash
-# 1. Create the venv (Python 3.12) and install deps
+# 1. Install Python 3.12, ffmpeg and Deno, then create the venv
 make setup          # or see commands below
 
 # 2. Put your BotFather token in .env
@@ -21,41 +21,72 @@ make run            # or: .venv/bin/python -m bot.main
 
 Manual equivalent:
 ```bash
-/opt/homebrew/opt/python@3.12/libexec/bin/python3 -m venv .venv
-.venv/bin/pip install -U pip -r requirements.txt
+python3.12 -m venv .venv
+.venv/bin/pip install -U pip
+.venv/bin/pip install --require-hashes -r requirements.lock
+.venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m bot.main
 ```
 
-`ffmpeg` must be installed (`brew install ffmpeg`) — used for audio extraction.
+`requirements.txt` is the human-maintained direct dependency list. Production
+Docker builds install the fully pinned, hashed `requirements.lock`; regenerate
+it deliberately with `uv pip compile requirements.txt --universal
+--generate-hashes --output-file requirements.lock`, then rerun all smoke tests.
+
+`ffmpeg` must be installed (`brew install ffmpeg`) for media processing. Current
+YouTube support also needs [Deno](https://deno.com/) for yt-dlp's JavaScript
+challenge solver (`brew install deno` on macOS). The Docker image includes both.
 
 ## Build status — all core features DONE ✅
 
 - [x] **/start** welcome menu + language switch (uz / ru / en, persisted per user)
 - [x] **Feature A** — name/artist → numbered results list + ◀️▶️ paging → tap → mp3
-- [x] **Feature B** — **Lyrics** button (lyrics.ovh, free/no-key)
+- [x] **Lyrics** button for recognized tracks (lyrics.ovh, free/no-key)
 - [x] **Feature C** — voice/audio/video/video-note → **recognize** (Shazamio) → album art + "Song title/Artist" header + results list + Lyrics/Video buttons
-- [x] **Feature D** — IG/TikTok/YouTube link → **quality picker** (360/480/720/Audio)
-- [x] **file_id cache** (instant repeats) + `👉 @<bot>` signature on every delivery
-- [ ] **Local Bot API server** (files > 50 MB) — ready in `docker-compose.yml`, opt-in
+- [x] **Feature D** — social-media link → **quality picker** (360/480/720/1080/Audio)
+- [x] **file_id/search/recognition caches** + bounded global/per-user concurrent jobs
+- [x] Killable, concurrency-limited provider workers with byte/duration/deadline guards
+- [x] Shazamio recognition with optional **AudD fallback** (`AUDD_TOKEN`)
+- [x] Owner-bound callback sessions, 7/30-day retention, `/privacy`, and `/delete_my_data`
+- [x] **Local Bot API server topology** — opt-in shared-volume Compose stack for incoming >20 MB or outgoing >50 MB
 
-All features use YouTube via yt-dlp — **no API keys needed**. Search coverage for
-Uzbek artists matches the reference bot exactly.
+Search and media delivery use YouTube via yt-dlp; Shazamio needs no API key.
+Provider behavior changes over time, so the pinned yt-dlp release and deployment
+smoke test should be reviewed regularly.
 
 ## Tests
 
 ```bash
-make test        # 43 fast offline tests (dispatcher-level, network faked) — ~0.2s
+make test        # fast offline tests (dispatcher-level, network faked)
 make test-net    # 5 real-internet smoke tests (search/download/recognize/lyrics)
+# Make total YouTube blockage fail instead of skip:
+STRICT_NETWORK_TESTS=1 make test-net
 ```
 
 **Speed note:** every delivered track's Telegram `file_id` is cached in SQLite.
-First fetch = download+convert+upload (a few seconds); **every repeat is instant**
-(re-sends the file_id, no download/upload). A server is faster than localhost for
-the first fetch (better uplink to Telegram), but the *instant* feel of big bots is
-this cache — see below.
+First fetch = download+convert+upload; **every repeat is usually near-instant**
+(re-sends the file_id, no source download/upload). The actual first-fetch speed
+depends on the provider, egress, media format and Telegram.
 
-> Age-restricted YouTube videos need cookies (`--cookies`) or that one track fails
-> with "Sign in to confirm your age".
+Cookies are used only to help yt-dlp reach otherwise public media when YouTube
+bot-checks the server. Private, members-only, premium, and login-only media is
+rejected even if the shared cookie account can access it.
+
+## Railway / cloud YouTube setup
+
+The image includes Deno and `yt-dlp-ejs`, but those are JavaScript-runtime
+requirements, not an anti-bot bypass. YouTube can still reject Railway's
+datacenter IP with `Sign in to confirm you’re not a bot`. When YouTube requires
+login/CAPTCHA state, try a fresh Netscape export in Railway as
+`YTDLP_COOKIES_CONTENT`; if that egress remains blocked, set `YTDLP_PROXY` to an
+authorized stable proxy with unblocked egress. Neither method guarantees access.
+Cookies are login credentials—use a low-privilege throwaway account and follow
+the exact procedure in [DEPLOY.md](DEPLOY.md). Startup logs report only whether
+cookies/proxy are configured; their values are never printed.
+
+The Local Bot API wiring and filesystem isolation are container-tested. Before
+raising the default 20/50 MB limits in production, run a credentialed canary with
+one inbound file above 20 MB and one outbound file above 50 MB.
 
 > No auto-reload: after editing code, `make stop && make start` (or restart `make run`).
 

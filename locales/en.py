@@ -3,30 +3,57 @@ STRINGS = {
         "👋 Hi! I'll help you find music 🎶\n\n"
         "Send me one of the following:\n\n"
         "🎵 Song or artist name\n"
-        "🔤 Song lyrics\n"
         "🎙 Voice message with music\n"
         "🎬 Video with music\n"
         "🎧 Audio recording\n"
-        "🔗 An Instagram, TikTok or YouTube link\n\n"
+        "🔗 An Instagram, TikTok, YouTube, Facebook or X link\n\n"
         "🕺 Enjoy!"
     ),
     "choose_language": "🌐 Choose your language:",
     "language_set": "✅ Language changed.",
+    "cmd_start": "Start",
+    "cmd_round": "Make a round video",
+    "cmd_lang": "Change language",
+    "cmd_privacy": "Privacy information",
+    "cmd_delete_my_data": "Delete my stored data",
+    "btn_privacy_policy": "Full privacy policy",
+    "privacy_notice": (
+        "🔐 <b>Privacy</b>\n\n"
+        "The bot stores your Telegram user ID and language until deletion; "
+        "button/search session data for up to 7 days; and recognition match "
+        "metadata for up to 30 days. Shared Telegram file IDs may be retained. "
+        "Uploaded media and recognition samples are deleted locally after processing.\n\n"
+        "Short samples or metadata may be processed by Shazam/AudD; searches and "
+        "downloads contact the source services; lyric requests contact lyrics.ovh; "
+        "and Railway plus any configured proxy process network traffic. Use "
+        "/delete_my_data to remove data associated with your user ID."
+    ),
+    "data_deleted": "✅ Data associated with your user ID was deleted.",
     # Feature D — links
     "fetching": "🔎 Fetching info...",
     "choose_quality": "🎬 Choose quality:",
     "downloading_quality": "⏳ Downloading {quality}...",
     "link_expired": "⚠️ Link expired. Please send it again.",
-    "downloading": "⏳ Downloading, please wait...",
     "download_failed": "❌ Couldn't download. Make sure the link is correct and public.",
-    "unsupported_link": "🤔 That link isn't supported. Send an Instagram, TikTok or YouTube link.",
-    "too_big": "⚠️ File is too big ({size} MB). Files over 50 MB need a Local Bot API server.",
+    "download_blocked": "⚠️ The source temporarily blocked this server. Please try again later.",
+    "download_rate_limited": "⚠️ The source is rate-limiting downloads. Please try again shortly.",
+    "download_private": "🔒 This media is private or requires an account.",
+    "download_too_large": "⚠️ This media is live, too long, or exceeds the bot's download limit.",
+    "upload_failed": "⚠️ The file was prepared, but Telegram delivery failed. Please try again.",
+    "already_processing": "⏳ Your previous request is still processing.",
+    "service_busy": "⏳ The media service is busy. Please try again shortly.",
+    "invalid_action": "⚠️ This button is invalid or outdated. Please start again.",
+    "unsupported_link": "🤔 That link isn't supported. Send an Instagram, TikTok, YouTube, Facebook or X link.",
+    "too_big": "⚠️ File is too big ({size} MB). This bot's current limit is {limit} MB.",
     # Feature A/B — search & lyrics
     "searching": "🔎 Searching...",
     "no_results": "😔 Nothing found. Try a different name.",
+    "query_too_long": "⚠️ That search is too long. Keep it under {limit} characters.",
     "sending_track": "⏳ Sending...",
     "btn_lyrics": "Lyrics",
     "btn_video": "Video",
+    "btn_listen": "Listen",
+    "btn_audio": "Audio",
     "btn_find_music": "Find music",
     "btn_round": "Round video",
     "lyrics_not_found": "😔 Lyrics not found.",
@@ -37,6 +64,7 @@ STRINGS = {
     # Feature C — recognition
     "recognizing": "🎧 Recognizing music...",
     "not_recognized": "😔 Couldn't recognize it. Send a clearer clip.",
+    "recognition_failed": "⚠️ Music recognition is temporarily unavailable. Please try again.",
     "rec_header": "🎵 Song title: <b>{title}</b>\nArtist: <b>{artist}</b>",
     "generic_error": "❌ Something went wrong. Please try again later.",
 }

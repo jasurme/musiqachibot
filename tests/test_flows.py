@@ -2,6 +2,7 @@
 import pytest
 
 from bot.handlers import results, url_download
+from bot import jobs
 from bot.services import downloader
 from bot.services.downloader import DownloadResult, MediaMeta
 from bot.services.recognizer import Track
@@ -30,8 +31,33 @@ def _items(n):
             for i in range(n)]
 
 
+async def test_privacy_command_discloses_retention(dp, bot, cap):
+    await dp.feed_update(bot, text_update("/privacy"))
+    message = cap.last("SendMessage")
+    assert "Privacy" in message.text
+    assert "7 days" in message.text and "30 days" in message.text
+
+
+async def test_delete_my_data_purges_db_and_memory(
+    dp, bot, cap, storage,
+):
+    await storage.set_locale(100, "en")
+    await storage.save_session("persisted", {"owner_user_id": 100, "url": "x"})
+    results._SESS["result"] = {"owner_user_id": 100}
+    url_download._PENDING["download"] = {"owner_user_id": 100}
+
+    await dp.feed_update(bot, text_update("/delete_my_data"))
+
+    assert await storage.get_locale(100) is None
+    assert await storage.get_session("persisted") is None
+    assert "result" not in results._SESS
+    assert "download" not in url_download._PENDING
+    assert "deleted" in cap.last("SendMessage").text.lower()
+
+
 def _fake_dl(config, counter):
-    async def fake(url, out_dir):
+    async def fake(url, out_dir, max_bytes=None):
+        assert max_bytes == config.max_file_mb * 1024 * 1024
         counter["n"] += 1
         import os
         p = os.path.join(config.download_dir, "t.mp3")
@@ -50,11 +76,11 @@ async def test_start_welcome_and_language_buttons(dp, bot, cap):
     assert {"setlang:uz", "setlang:ru", "setlang:en"} <= set(datas)
 
 
-async def test_first_time_user_defaults_to_uzbek(dp, bot, cap):
-    # brand-new user whose Telegram client language is English → still Uzbek
+async def test_first_time_user_uses_configured_default(dp, bot, cap):
+    # The fixture config sets English; Telegram client language does not override it.
     await dp.feed_update(bot, text_update("/start", user_id=777, lang="en"))
     sm = cap.last("SendMessage")
-    assert "Salom" in sm.text  # Uzbek welcome, not English "Hi!"
+    assert "Hi!" in sm.text
 
 
 async def test_stored_choice_overrides_default(dp, bot, cap, storage):
@@ -95,6 +121,32 @@ async def test_search_no_results(dp, bot, cap, monkeypatch):
     assert "😔" in em.text
 
 
+async def test_unsupported_url_is_not_sent_to_music_search(dp, bot, cap, monkeypatch):
+    called = {"n": 0}
+
+    async def fake_search(q, limit=30):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr("bot.handlers.text_search.search_tracks", fake_search)
+    await dp.feed_update(bot, text_update("https://example.com/video"))
+    assert called["n"] == 0
+    assert "isn't supported" in cap.last("SendMessage").text
+
+
+async def test_long_search_is_rejected_before_provider_call(dp, bot, cap, monkeypatch):
+    called = {"n": 0}
+
+    async def fake_search(q, limit=30):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr("bot.handlers.text_search.search_tracks", fake_search)
+    await dp.feed_update(bot, text_update("x" * 201))
+    assert called["n"] == 0
+    assert "too long" in cap.last("SendMessage").text
+
+
 async def test_pick_downloads_signs_and_caches(dp, bot, cap, config, monkeypatch, storage):
     counter = {"n": 0}
     monkeypatch.setattr(downloader, "download_audio", _fake_dl(config, counter))
@@ -113,7 +165,7 @@ async def test_pick_downloads_signs_and_caches(dp, bot, cap, config, monkeypatch
     sa = cap.last("SendAudio")
     assert sa is not None and "👉 @testbot" in sa.caption
     assert counter["n"] == 1
-    assert await storage.get_cached_audio("ytaudio:v0") is not None
+    assert await storage.get_cached_audio("bot:123456:ytaudio:v0") is not None
 
     # 3) second identical pick → NO new download, reuses cached file_id
     cap.methods.clear()
@@ -121,6 +173,19 @@ async def test_pick_downloads_signs_and_caches(dp, bot, cap, config, monkeypatch
     sa2 = cap.last("SendAudio")
     assert counter["n"] == 1, "cache miss — should not re-download"
     assert isinstance(sa2.audio, str) and sa2.audio.startswith("AUDIO_")
+
+
+async def test_repeated_tap_does_not_start_overlapping_job(dp, bot, cap, config, monkeypatch):
+    url_download._PENDING["tok"] = {"url": "https://youtu.be/abc", "title": "Song"}
+    counter = {"n": 0}
+    monkeypatch.setattr(downloader, "download_audio", _fake_dl(config, counter))
+    assert jobs.claim(100)
+
+    await dp.feed_update(bot, callback_update("dl:tok:audio"))
+
+    assert counter["n"] == 0
+    answer = cap.last("AnswerCallbackQuery")
+    assert answer.show_alert is True and "still processing" in answer.text
 
 
 async def test_pagination_next_page(dp, bot, cap, monkeypatch):
@@ -146,6 +211,7 @@ class _FakeRec:
 
 async def test_recognition_shows_header_art_and_extras(dp, bot, cap, monkeypatch):
     async def fake_download(media, destination=None, **kw):
+        assert kw == {"timeout": 300}
         with open(destination, "wb") as f:
             f.write(b"x")
     monkeypatch.setattr(bot, "download", fake_download)
@@ -171,6 +237,7 @@ async def test_recognition_shows_header_art_and_extras(dp, bot, cap, monkeypatch
 
 async def test_recognition_failure(dp, bot, cap, monkeypatch):
     async def fake_download(media, destination=None, **kw):
+        assert kw == {"timeout": 300}
         with open(destination, "wb") as f:
             f.write(b"x")
     monkeypatch.setattr(bot, "download", fake_download)
@@ -180,6 +247,45 @@ async def test_recognition_failure(dp, bot, cap, monkeypatch):
     await dp.feed_update(bot, voice_update())
     em = cap.last("EditMessageText")
     assert "😔" in em.text
+
+
+async def test_recognition_survives_enrichment_search_outage(
+    dp, bot, cap, monkeypatch,
+):
+    async def fake_download(media, destination=None, **kw):
+        with open(destination, "wb") as stream:
+            stream.write(b"x")
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("YouTube unavailable")
+
+    monkeypatch.setattr(bot, "download", fake_download)
+    monkeypatch.setattr(
+        "bot.services.audio.make_sample", lambda *a, **k: _aret("s.mp3")
+    )
+    monkeypatch.setattr(
+        "bot.handlers.media_recognize.get_recognizer",
+        lambda cfg: _FakeRec(
+            Track(
+                title="Believer", artist="Imagine Dragons",
+                url="https://example.com/listen", cover="http://cover.jpg",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "bot.handlers.media_recognize.search_tracks", unavailable
+    )
+
+    await dp.feed_update(bot, voice_update())
+    photo = cap.last("SendPhoto")
+    assert photo is not None and "Believer" in photo.caption
+    buttons = [
+        button
+        for row in photo.reply_markup.inline_keyboard
+        for button in row
+    ]
+    assert any(button.url == "https://example.com/listen" for button in buttons)
+    assert not any((button.callback_data or "").startswith("vid:") for button in buttons)
 
 
 # ── Feature B: lyrics button ─────────────────────────────
@@ -235,6 +341,31 @@ async def test_video_button_reuses_quality_picker(dp, bot, cap, monkeypatch):
     assert any(d.startswith("dl:") for d in datas)
 
 
+async def test_result_callback_is_bound_to_requesting_user(dp, bot, cap):
+    results._SESS["owned"] = {
+        "header": "h", "items": _items(1), "per_page": 5,
+        "extras": False, "owner_user_id": 7,
+    }
+    await dp.feed_update(
+        bot, callback_update("pick:owned:0", user_id=8)
+    )
+    answer = cap.last("AnswerCallbackQuery")
+    assert answer.show_alert is True
+    assert "invalid" in answer.text.lower()
+
+
+async def test_download_callback_is_bound_to_requesting_user(dp, bot, cap):
+    url_download._PENDING["owned"] = {
+        "url": "https://youtu.be/abc", "title": "Song", "owner_user_id": 7,
+    }
+    await dp.feed_update(
+        bot, callback_update("dl:owned:audio", user_id=8)
+    )
+    answer = cap.last("AnswerCallbackQuery")
+    assert answer.show_alert is True
+    assert "invalid" in answer.text.lower()
+
+
 async def test_quality_audio_download(dp, bot, cap, config, monkeypatch, storage):
     url_download._PENDING["tok"] = {"url": "https://youtu.be/abc", "title": "Song"}
     counter = {"n": 0}
@@ -245,13 +376,37 @@ async def test_quality_audio_download(dp, bot, cap, config, monkeypatch, storage
     assert sa is not None and "👉 @testbot" in sa.caption
     assert counter["n"] == 1
     # cached under the dl: key
-    assert await storage.get_cached_audio("dl:https://youtu.be/abc:audio") is not None
+    assert await storage.get_cached_audio(
+        "bot:123456:dl:https://youtu.be/abc:audio"
+    ) is not None
+
+
+async def test_cached_media_bypasses_provider_circuit(
+    dp, bot, cap, monkeypatch, storage,
+):
+    url = "https://youtu.be/abc"
+    url_download._PENDING["tok"] = {"url": url, "title": "Song"}
+    await storage.set_cached_audio(
+        f"bot:{bot.id}:dl:{url}:audio", "CACHED_AUDIO", "Song"
+    )
+    downloader.record_provider_failure(
+        url, downloader.yt_dlp.utils.DownloadError("HTTP Error 403: Forbidden")
+    )
+
+    async def should_not_download(*args, **kwargs):
+        raise AssertionError("cached file_id should bypass yt-dlp")
+
+    monkeypatch.setattr(downloader, "download_audio", should_not_download)
+    await dp.feed_update(bot, callback_update("dl:tok:audio"))
+    sent = cap.last("SendAudio")
+    assert sent is not None and sent.audio == "CACHED_AUDIO"
 
 
 async def test_quality_video_download(dp, bot, cap, config, monkeypatch):
     url_download._PENDING["tok"] = {"url": "https://youtu.be/abc", "title": "Song"}
 
-    async def fake_vq(url, out_dir, height):
+    async def fake_vq(url, out_dir, height, max_bytes=None):
+        assert max_bytes == config.max_file_mb * 1024 * 1024
         import os
         p = os.path.join(config.download_dir, "v.mp4")
         with open(p, "wb") as f:
@@ -268,7 +423,8 @@ async def test_quality_video_download(dp, bot, cap, config, monkeypatch):
 async def test_link_find_music_button(dp, bot, cap, config, monkeypatch):
     url_download._PENDING["tok"] = {"url": "https://www.tiktok.com/@x/video/1", "title": "V"}
 
-    async def fake_dl_audio(url, out_dir):
+    async def fake_dl_audio(url, out_dir, max_bytes=None):
+        assert max_bytes == config.max_file_mb * 1024 * 1024
         import os
         p = os.path.join(config.download_dir, "a.mp3")
         with open(p, "wb") as f:
@@ -298,7 +454,8 @@ async def test_link_find_music_button(dp, bot, cap, config, monkeypatch):
 async def test_link_find_music_not_recognized(dp, bot, cap, config, monkeypatch):
     url_download._PENDING["tok"] = {"url": "https://youtu.be/abc", "title": "V"}
 
-    async def fake_dl_audio(url, out_dir):
+    async def fake_dl_audio(url, out_dir, max_bytes=None):
+        assert max_bytes == config.max_file_mb * 1024 * 1024
         import os
         p = os.path.join(config.download_dir, "a.mp3")
         with open(p, "wb") as f:
@@ -343,13 +500,17 @@ async def test_group_tagged_searches(dp, bot, cap, monkeypatch):
     assert cap.last("EditMessageText") is not None
 
 
-async def test_group_link_is_handled(dp, bot, cap, monkeypatch):
+async def test_group_link_requires_mention(dp, bot, cap, monkeypatch):
     async def fake_meta(url):
         return MediaMeta(url=url, title="V", uploader="ch", duration=1,
                          thumbnail=None, heights=[360, 720])
     monkeypatch.setattr(downloader, "extract_meta", fake_meta)
 
     await dp.feed_update(bot, text_update("https://youtu.be/abc",
+                                          chat_type="supergroup", chat_id=-100))
+    assert cap.methods == []
+
+    await dp.feed_update(bot, text_update("@testbot https://youtu.be/abc", uid=2,
                                           chat_type="supergroup", chat_id=-100))
     sm = cap.last("SendMessage")
     datas = [b.callback_data for row in sm.reply_markup.inline_keyboard for b in row]
@@ -364,6 +525,7 @@ async def test_group_ignores_media(dp, bot, cap, monkeypatch):
 # ── round video-notes (yumaloq video) ────────────────────
 async def test_round_command_then_video(dp, bot, cap, config, monkeypatch):
     async def fake_download(media, destination=None, **kw):
+        assert kw == {"timeout": 300}
         with open(destination, "wb") as f:
             f.write(b"x")
     monkeypatch.setattr(bot, "download", fake_download)
@@ -382,7 +544,8 @@ async def test_round_command_then_video(dp, bot, cap, config, monkeypatch):
 async def test_round_link_button(dp, bot, cap, config, monkeypatch):
     url_download._PENDING["tok"] = {"url": "https://youtu.be/abc", "title": "V"}
 
-    async def fake_vq(url, out_dir, height):
+    async def fake_vq(url, out_dir, height, max_bytes=None):
+        assert max_bytes == config.max_file_mb * 1024 * 1024
         import os
         p = os.path.join(out_dir, "v.mp4")
         with open(p, "wb") as f:
@@ -398,6 +561,7 @@ async def test_round_link_button(dp, bot, cap, config, monkeypatch):
 async def test_video_normally_recognizes_not_rounds(dp, bot, cap, config, monkeypatch):
     # without /round first, a video goes to recognition, NOT round conversion
     async def fake_download(media, destination=None, **kw):
+        assert kw == {"timeout": 300}
         with open(destination, "wb") as f:
             f.write(b"x")
     monkeypatch.setattr(bot, "download", fake_download)
@@ -444,7 +608,8 @@ async def test_link_button_survives_restart(dp, bot, cap, config, monkeypatch):
     url_download._PENDING.clear()
     cap.methods.clear()
 
-    async def fake_vq(url, out_dir, height):
+    async def fake_vq(url, out_dir, height, max_bytes=None):
+        assert max_bytes == config.max_file_mb * 1024 * 1024
         import os
         p = os.path.join(config.download_dir, "v.mp4")
         with open(p, "wb") as f:
