@@ -17,11 +17,14 @@ from aiogram.types import (
     Audio,
     CallbackQuery,
     Chat,
+    Document,
     Message,
+    MessageId,
     PhotoSize,
     Update,
     User,
     Video,
+    VideoNote,
     Voice,
 )
 
@@ -31,6 +34,7 @@ from bot.config import Config
 from bot import jobs
 from bot.db.storage import Storage
 from bot.handlers import (
+    broadcast,
     media_recognize,
     results,
     round as round_handler,
@@ -41,7 +45,7 @@ from bot.handlers import (
 from bot.middlewares.i18n import I18nMiddleware
 
 FAKE_TOKEN = "123456:FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE"
-ALL_ROUTERS = (round_handler.router, start.router, url_download.router,
+ALL_ROUTERS = (broadcast.router, round_handler.router, start.router, url_download.router,
                media_recognize.router, text_search.router, results.router)
 
 
@@ -81,6 +85,8 @@ async def bot(cap):
         name = type(method).__name__
         if name in ("AnswerCallbackQuery", "DeleteMessage"):
             return True
+        if name == "CopyMessage":
+            return MessageId(message_id=n)
         if name == "SendAudio":
             msg = Message(message_id=n, date=_now(), chat=Chat(id=1, type="private"),
                           audio=Audio(file_id=f"AUDIO_{n}", file_unique_id=f"u{n}", duration=1))
@@ -147,8 +153,8 @@ async def dp(storage, config):
     d["config"] = config
     d["bot_username"] = "testbot"
     i18n = I18nMiddleware(storage, config.default_locale)
-    d.message.middleware(i18n)
-    d.callback_query.middleware(i18n)
+    d.message.outer_middleware(i18n)
+    d.callback_query.outer_middleware(i18n)
     for r in ALL_ROUTERS:
         d.include_router(r)
     return d
@@ -184,6 +190,26 @@ def video_update(uid=1, lang="en", user_id=100, chat_id=100):
         message_id=uid, date=_now(), chat=Chat(id=chat_id, type="private"),
         from_user=User(id=user_id, is_bot=False, first_name="T", language_code=lang),
         video=Video(file_id="VID1", file_unique_id="vu1", width=100, height=100, duration=10),
+    ))
+
+
+def video_note_update(uid=1, lang="en", user_id=100, chat_id=100):
+    return Update(update_id=uid, message=Message(
+        message_id=uid, date=_now(), chat=Chat(id=chat_id, type="private"),
+        from_user=User(id=user_id, is_bot=False, first_name="T", language_code=lang),
+        video_note=VideoNote(
+            file_id="NOTE1", file_unique_id="nu1", length=240, duration=10
+        ),
+    ))
+
+
+def document_update(uid=1, lang="en", user_id=100, chat_id=100):
+    return Update(update_id=uid, message=Message(
+        message_id=uid, date=_now(), chat=Chat(id=chat_id, type="private"),
+        from_user=User(id=user_id, is_bot=False, first_name="T", language_code=lang),
+        document=Document(
+            file_id="DOC1", file_unique_id="du1", file_name="announcement.pdf"
+        ),
     ))
 
 

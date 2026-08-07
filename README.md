@@ -44,6 +44,7 @@ challenge solver (`brew install deno` on macOS). The Docker image includes both.
 - [x] **Lyrics** button for recognized tracks (lyrics.ovh, free/no-key)
 - [x] **Feature C** — voice/audio/video/video-note → **recognize** (Shazamio) → album art + "Song title/Artist" header + results list + Lyrics/Video buttons
 - [x] **Feature D** — social-media link → **quality picker** (360/480/720/1080/Audio)
+- [x] **Admin broadcast** — private text/video/video-note/document/media from the configured admin is copied to every active private user
 - [x] **file_id/search/recognition caches** + bounded global/per-user concurrent jobs
 - [x] Killable, concurrency-limited provider workers with byte/duration/deadline guards
 - [x] Shazamio recognition with optional **AudD fallback** (`AUDD_TOKEN`)
@@ -58,7 +59,7 @@ smoke test should be reviewed regularly.
 
 ```bash
 make test        # fast offline tests (dispatcher-level, network faked)
-make test-net    # 5 real-internet smoke tests (search/download/recognize/lyrics)
+make test-net    # real-internet smoke tests (search/download/recognize/lyrics/Instagram)
 # Make total YouTube blockage fail instead of skip:
 STRICT_NETWORK_TESTS=1 make test-net
 ```
@@ -68,14 +69,21 @@ First fetch = download+convert+upload; **every repeat is usually near-instant**
 (re-sends the file_id, no source download/upload). The actual first-fetch speed
 depends on the provider, egress, media format and Telegram.
 
-Cookies are used only to help yt-dlp reach otherwise public media when YouTube
+Cookies are used only to help yt-dlp reach otherwise public media when a source
 bot-checks the server. Private, members-only, premium, and login-only media is
 rejected even if the shared cookie account can access it.
 
+`ADMIN_USER_ID` defaults to `7645204689`. Every copyable message sent by that
+user in the bot's private chat is an announcement; it is copied without forward
+attribution and paced at `BROADCAST_RATE_PER_SECOND=20`. Blocked/deactivated
+recipients are removed from later sends. `/delete_my_data` removes a user from
+the audience until they interact privately with the bot again.
+
 ## Railway / cloud YouTube setup
 
-The image includes Deno and `yt-dlp-ejs`, but those are JavaScript-runtime
-requirements, not an anti-bot bypass. YouTube can still reject Railway's
+The image includes Deno, `yt-dlp-ejs`, and `curl_cffi` browser impersonation,
+but those are extractor/runtime requirements, not an anti-bot bypass. YouTube
+can still reject Railway's
 datacenter IP with `Sign in to confirm you’re not a bot`. When YouTube requires
 login/CAPTCHA state, try a fresh Netscape export in Railway as
 `YTDLP_COOKIES_CONTENT`; if that egress remains blocked, set `YTDLP_PROXY` to an
@@ -97,9 +105,9 @@ bot/
   main.py            entrypoint (dispatcher, routers, middleware)
   config.py          env loading
   i18n.py            translation lookup
-  handlers/          /start, url download, text search, media recognize
+  handlers/          admin broadcast, /start, downloads, search, recognition
   services/          downloader (yt-dlp), audio (ffmpeg), recognizer, search
-  db/storage.py      sqlite: user locale + file_id cache
-  middlewares/       i18n locale resolution
+  db/storage.py      sqlite: active users, locale, sessions + file_id cache
+  middlewares/       private-user registration + i18n locale resolution
 locales/             uz / ru / en strings
 ```

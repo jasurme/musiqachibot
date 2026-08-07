@@ -36,13 +36,25 @@ async def test_download_audio_real(tmp_path):
         except Exception as e:  # noqa: BLE001
             last_err = e
             continue
-        assert res.path.endswith(".mp3")
+        assert os.path.splitext(res.path)[1].lower() in {".m4a", ".mp3"}
         size_mb = os.path.getsize(res.path) / (1024 * 1024)
         assert 0.1 < size_mb < 50
         return
     if os.getenv("STRICT_NETWORK_TESTS") == "1":
         pytest.fail(f"YouTube blocked every download candidate: {last_err}")
     pytest.skip(f"YouTube rate-limited/blocked all candidates: {last_err}")
+
+
+async def test_download_portrait_instagram_reel_real(tmp_path):
+    url = "https://www.instagram.com/reel/Chunk8-jurw/"
+    meta = await downloader.extract_meta(url)
+    assert meta.media_id == "Chunk8-jurw"
+    assert 720 in meta.heights
+    result = await downloader.download_video_quality(
+        url, str(tmp_path), 720, max_bytes=50 * 1024 * 1024
+    )
+    assert result.ext == "mp4"
+    assert 1000 < os.path.getsize(result.path) < 50 * 1024 * 1024
 
 
 async def test_recognize_real(tmp_path):

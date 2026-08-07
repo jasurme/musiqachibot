@@ -1,6 +1,7 @@
 """Unit tests for pure helpers — no bot, no network."""
 import asyncio
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -35,6 +36,8 @@ def test_config_validates_and_uses_default_locale(monkeypatch):
     monkeypatch.setenv("HEAVY_JOB_CONCURRENCY", "4")
     monkeypatch.setenv("SEARCH_MAX_SECONDS", "1000")
     monkeypatch.setenv("SEARCH_CACHE_SECONDS", "0")
+    monkeypatch.setenv("ADMIN_USER_ID", "7645204689")
+    monkeypatch.setenv("BROADCAST_RATE_PER_SECOND", "15")
     monkeypatch.setenv("PRIVACY_POLICY_URL", "https://example.com/privacy")
     monkeypatch.setenv("DROP_PENDING_UPDATES", "true")
     config = load_config()
@@ -49,6 +52,8 @@ def test_config_validates_and_uses_default_locale(monkeypatch):
     assert config.heavy_job_concurrency == 4
     assert config.search_max_seconds == 1000
     assert config.search_cache_seconds == 0
+    assert config.admin_user_id == 7645204689
+    assert config.broadcast_rate_per_second == 15
     assert config.privacy_policy_url == "https://example.com/privacy"
     assert config.drop_pending_updates is True
 
@@ -90,6 +95,13 @@ def test_config_rejects_excessive_heavy_job_concurrency(monkeypatch):
     monkeypatch.setenv("BOT_TOKEN", "test-token")
     monkeypatch.setenv("HEAVY_JOB_CONCURRENCY", "9")
     with pytest.raises(RuntimeError, match="HEAVY_JOB_CONCURRENCY"):
+        load_config()
+
+
+def test_config_rejects_excessive_broadcast_rate(monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", "test-token")
+    monkeypatch.setenv("BROADCAST_RATE_PER_SECOND", "26")
+    with pytest.raises(RuntimeError, match="BROADCAST_RATE_PER_SECOND"):
         load_config()
 
 
@@ -181,6 +193,35 @@ def test_download_error_classifies_railway_youtube_bot_check():
     assert downloader.download_error_key(exc) == "download_blocked"
 
 
+def test_download_error_classifies_instagram_challenges():
+    empty = RuntimeError("Instagram sent an empty media response")
+    private = RuntimeError(
+        "This content is only available for registered users who follow this account"
+    )
+    limited = RuntimeError(
+        "redirected to the login page: exceeded the rate-limit for accessing posts"
+    )
+    assert downloader.download_error_key(empty) == "download_failed"
+    assert downloader.download_error_key(private) == "download_private"
+    assert downloader.download_error_key(limited) == "download_rate_limited"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Instagram sent an empty media response",
+        "This content is only available for registered users who follow this account",
+    ],
+)
+def test_per_post_instagram_failure_does_not_open_provider_circuit(reason):
+    url = "https://www.instagram.com/reel/bad-post/"
+    downloader.clear_provider_failures()
+    downloader.record_provider_failure(
+        url, downloader.yt_dlp.utils.DownloadError(reason)
+    )
+    assert downloader.provider_error_key(url) is None
+
+
 def test_provider_circuit_breaker_stops_immediate_retries():
     url = "https://www.youtube.com/watch?v=abc"
     error = downloader.yt_dlp.utils.DownloadError("HTTP Error 403: Forbidden")
@@ -226,6 +267,27 @@ def test_cookie_mode_ignores_forced_player_clients(monkeypatch, tmp_path):
         "YTDLP_PLAYER_CLIENT is ignored" in warning
         for warning in downloader.runtime_warnings()
     )
+
+
+def test_instagram_uses_proxy_but_never_shared_account_cookies(monkeypatch, tmp_path):
+    general = tmp_path / "youtube.txt"
+    general.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    monkeypatch.setenv("YTDLP_COOKIES_FILE", str(general))
+    monkeypatch.setenv("YTDLP_PROXY", "http://general.invalid:8000")
+    monkeypatch.setenv("INSTAGRAM_PROXY", "http://instagram.invalid:8000")
+
+    instagram_opts = downloader._net_opts(
+        "https://www.instagram.com/reel/example/"
+    )
+    youtube_opts = downloader._net_opts(
+        "https://www.youtube.com/watch?v=example"
+    )
+
+    assert "cookiefile" not in instagram_opts
+    assert instagram_opts["proxy"] == "http://instagram.invalid:8000"
+    assert youtube_opts["cookiefile"] == str(general)
+    assert youtube_opts["proxy"] == "http://general.invalid:8000"
+    assert downloader.provider_name("https://scontent.cdninstagram.com/video.mp4") == "instagram"
 
 
 def test_cookieless_mode_can_use_explicit_player_clients(monkeypatch):
@@ -622,6 +684,68 @@ def test_youtube_audio_cache_key_is_shared_across_entry_paths():
     assert search_key == short_link_key == "bot:123:ytaudio:abc123"
 
 
+def test_instagram_cache_key_ignores_tracking_url_when_media_id_is_known():
+    first = downloader.telegram_media_cache_key(
+        123, "https://www.instagram.com/reel/abc/?igsh=tracking", "720",
+        media_id="abc",
+    )
+    second = downloader.telegram_media_cache_key(
+        123, "https://instagram.com/reels/abc/", "720", media_id="abc",
+    )
+    assert first == second == "bot:123:dl:instagram:abc:720"
+
+
+@pytest.mark.parametrize(
+    "format_info,resolution",
+    [
+        ({"width": 720, "height": 1280}, 720),
+        ({"width": 1280, "height": 720}, 720),
+        ({"width": 1080, "height": 1920}, 1080),
+        ({"height": 480}, 480),
+    ],
+)
+def test_video_resolution_uses_short_edge(format_info, resolution):
+    assert downloader._format_resolution(format_info) == resolution
+
+
+def test_video_download_uses_orientation_neutral_resolution_sort(
+    monkeypatch, tmp_path,
+):
+    captured = {}
+
+    class FakeYDL:
+        def __init__(self, opts):
+            captured.update(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=True):
+            output = captured["outtmpl"].replace("%(id)s", "portrait")
+            output = output.replace("%(ext)s", "mp4")
+            Path(output).write_bytes(b"video")
+            return {
+                "id": "portrait", "title": "Portrait", "duration": 10,
+                "width": 720, "height": 1280,
+                "vcodec": "avc1.64001f", "acodec": "mp4a.40.2",
+            }
+
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYDL)
+    result = downloader._download_quality_sync(
+        "https://www.instagram.com/reel/portrait/", str(tmp_path), 720,
+        1024,
+    )
+
+    assert captured["format_sort"] == ["res:720", "ext:mp4:m4a"]
+    assert captured["format"].startswith("best[ext=mp4]/")
+    assert "height<=" not in captured["format"]
+    assert "bestvideo" in captured["format"] and "best" in captured["format"]
+    assert Path(result.path).is_file()
+
+
 def test_media_singleflight_lock_reuses_live_key():
     first = downloader.media_singleflight_lock("same")
     second = downloader.media_singleflight_lock("same")
@@ -698,6 +822,24 @@ def test_telegram_video_compatibility_requires_mp4_h264_aac(tmp_path):
     assert not downloader._is_telegram_mp4(compatible, str(tmp_path / "clip.webm"))
 
 
+def test_telegram_mp4_probes_when_extractor_codecs_are_unknown(
+    monkeypatch, tmp_path,
+):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    probes = []
+
+    def compatible_probe(path):
+        probes.append(path)
+        return True
+
+    monkeypatch.setattr(downloader, "_probe_telegram_mp4_codecs", compatible_probe)
+    assert downloader._is_telegram_mp4(
+        {"vcodec": "unknown", "acodec": "unknown"}, str(source)
+    )
+    assert probes == [str(source)]
+
+
 def test_provider_audio_conversion_produces_mp3(tmp_path):
     source = str(tmp_path / "source.wav")
     subprocess.run(
@@ -763,6 +905,45 @@ async def test_storage_locale_roundtrip():
     await s.set_locale(1, "en")  # upsert
     assert await s.get_locale(1) == "en"
     await s.close()
+
+
+async def test_storage_tracks_reactivates_and_pages_broadcast_users():
+    s = Storage(":memory:")
+    await s.init()
+    for user_id in (1, 2, 3, 4, 5):
+        await s.touch_private_user(user_id)
+    await s.set_locale(2, "ru")
+    await s.mark_users_inactive([2, 4])
+
+    assert await s.get_active_user_ids(limit=2) == [1, 3]
+    assert await s.get_active_user_ids(
+        after_user_id=3, limit=2, exclude_user_id=5
+    ) == []
+    assert await s.touch_private_user(2) == "ru"
+    assert await s.get_active_user_ids() == [1, 2, 3, 5]
+    await s.close()
+
+
+async def test_storage_migrates_legacy_users_and_backfills_session_owner(tmp_path):
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE users (user_id INTEGER PRIMARY KEY, locale TEXT)"
+    )
+    connection.execute("INSERT INTO users VALUES (7, 'ru')")
+    connection.commit()
+    connection.close()
+
+    first = Storage(str(path))
+    await first.init()
+    await first.save_session("owned", {"owner_user_id": 9, "header": "x"})
+    await first.close()
+
+    second = Storage(str(path))
+    await second.init()
+    assert await second.get_locale(7) == "ru"
+    assert await second.get_active_user_ids() == [7, 9]
+    await second.close()
 
 
 async def test_storage_audio_cache_roundtrip():
@@ -834,9 +1015,10 @@ def test_deployment_includes_current_youtube_solver_runtime():
     root = Path(__file__).resolve().parent.parent
     requirements = (root / "requirements.txt").read_text()
     dockerfile = (root / "Dockerfile").read_text()
-    assert "yt-dlp[default]==2026.7.4" in requirements
+    assert "yt-dlp[default,curl-cffi]==2026.7.4" in requirements
     assert "denoland/deno:bin-2.9.3" in dockerfile
     assert "import yt_dlp_ejs" in dockerfile
+    assert "import curl_cffi" in dockerfile
     assert "ffmpeg tini" in dockerfile
     assert 'ENTRYPOINT ["/app/docker-entrypoint.sh"]' in dockerfile
     entrypoint = (root / "docker-entrypoint.sh").read_text()

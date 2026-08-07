@@ -13,6 +13,7 @@ from bot.config import Config, load_config
 from bot import jobs
 from bot.db.storage import Storage
 from bot.handlers import (
+    broadcast,
     media_recognize,
     results,
     round as round_handler,
@@ -47,9 +48,7 @@ def _build_telegram_session(config: Config) -> AiohttpSession:
 
 
 def _materialize_cookies() -> str | None:
-    """Railway/cloud hosts expose string env vars, not files. If cookies are
-    provided as YTDLP_COOKIES_CONTENT, write them to a file and point
-    YTDLP_COOKIES_FILE at it so yt-dlp can use them."""
+    """Materialize Railway's multiline YouTube cookie variable securely."""
     content = os.getenv("YTDLP_COOKIES_CONTENT")
     configured_file = os.getenv("YTDLP_COOKIES_FILE")
     if content and (not configured_file or not os.path.isfile(configured_file)):
@@ -120,12 +119,13 @@ async def main() -> None:
         for warning in runtime_warnings():
             logger.warning("startup dependency check: %s", warning)
         logger.info(
-            "yt-dlp auth configuration: cookies=%s proxy=%s",
+            "yt-dlp auth configuration: cookies=%s proxy=%s instagram_proxy=%s",
             bool(
                 os.getenv("YTDLP_COOKIES_FILE")
                 and os.path.isfile(os.environ["YTDLP_COOKIES_FILE"])
             ),
             bool(os.getenv("YTDLP_PROXY")),
+            bool(os.getenv("INSTAGRAM_PROXY")),
         )
 
         session = _build_telegram_session(config)
@@ -145,10 +145,14 @@ async def main() -> None:
         dp["config"] = config
 
         i18n = I18nMiddleware(storage, config.default_locale)
-        dp.message.middleware(i18n)
-        dp.callback_query.middleware(i18n)
+        # Outer middleware sees even otherwise-unhandled private files, so the
+        # broadcast audience contains every user who interacts with the bot.
+        dp.message.outer_middleware(i18n)
+        dp.callback_query.outer_middleware(i18n)
 
-        # order matters: round (state-filtered) first, URL before catch-all text
+        # Order matters: admin broadcasts must preempt every normal workflow;
+        # round is state-filtered, and URL must precede catch-all text search.
+        dp.include_router(broadcast.router)
         dp.include_router(round_handler.router)
         dp.include_router(start.router)
         dp.include_router(url_download.router)

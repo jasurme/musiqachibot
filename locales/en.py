@@ -19,7 +19,8 @@ STRINGS = {
     "btn_privacy_policy": "Full privacy policy",
     "privacy_notice": (
         "🔐 <b>Privacy</b>\n\n"
-        "The bot stores your Telegram user ID and language until deletion; "
+        "The bot stores your Telegram user ID and language until deletion, "
+        "including to deliver bot announcements; "
         "button/search session data for up to 7 days; and recognition match "
         "metadata for up to 30 days. Shared Telegram file IDs may be retained. "
         "Uploaded media and recognition samples are deleted locally after processing.\n\n"
@@ -29,6 +30,11 @@ STRINGS = {
         "/delete_my_data to remove data associated with your user ID."
     ),
     "data_deleted": "✅ Data associated with your user ID was deleted.",
+    "broadcast_done": (
+        "✅ Broadcast complete. Sent: {sent}. "
+        "Inactive: {inactive}. Failed: {failed}."
+    ),
+    "broadcast_unsupported": "⚠️ Telegram cannot copy this message type.",
     # Feature D — links
     "fetching": "🔎 Fetching info...",
     "choose_quality": "🎬 Choose quality:",

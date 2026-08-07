@@ -1,4 +1,4 @@
-"""Resolve the user's locale once per update and inject `_` + `locale`."""
+"""Register private users, resolve locale, and inject `_` + `locale`."""
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
@@ -21,7 +21,13 @@ class I18nMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         locale = self.default_locale
         if user is not None:
-            stored = await self.db.get_locale(user.id)
+            chat = getattr(event, "chat", None)
+            if chat is None:
+                chat = getattr(getattr(event, "message", None), "chat", None)
+            if getattr(chat, "type", None) == "private":
+                stored = await self.db.touch_private_user(user.id)
+            else:
+                stored = await self.db.get_locale(user.id)
             if stored in SUPPORTED:
                 locale = stored  # ...unless they've explicitly chosen a language
 

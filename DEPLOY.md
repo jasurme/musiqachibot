@@ -17,11 +17,14 @@ the bot processes any user media.
 | `BOT_TOKEN` | ✅ | your token from @BotFather |
 | `DB_PATH` | recommended | `/data/musiqa.db` (see Volume below) |
 | `DEFAULT_LOCALE` | optional | `uz` |
+| `ADMIN_USER_ID` | recommended | `7645204689`; every private message from this user is broadcast |
+| `BROADCAST_RATE_PER_SECOND` | optional | `20`; do not exceed the validated maximum of `25` |
 | `MAX_FILE_MB` | optional | `50` |
 | `MAX_INPUT_MB` | optional | `20` (standard Bot API incoming-file limit) |
 | `PRIVACY_POLICY_URL` | required for public launch | operator-specific HTTPS policy shown by `/privacy`; configure in BotFather too |
 | `YTDLP_COOKIES_CONTENT` | conditional | fresh Netscape cookie export when YouTube requires login/CAPTCHA state; see §4 |
 | `YTDLP_PROXY` | sometimes needed | authorized stable proxy whose egress is not blocked |
+| `INSTAGRAM_PROXY` | rarely needed | Instagram-only authorized stable proxy |
 | `YTDLP_CONCURRENCY` | optional | `3` |
 | `HEAVY_JOB_CONCURRENCY` | optional | `3`; global cap across user download/conversion/recognition jobs |
 | `YTDLP_SLEEP_REQUESTS` | optional | `0`; increase only if measured rate limits justify the latency |
@@ -89,9 +92,22 @@ Official references: [yt-dlp YouTube cookie guidance](https://github.com/yt-dlp/
 [cookie format FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp),
 and [EJS setup](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
 
-`yt-dlp[default]` is pinned to the tested 2026.07.04 upstream security release;
-this repository and image have not received a formal security audit. Update the
+`yt-dlp[default,curl-cffi]` is pinned to the tested 2026.07.04 upstream security
+release; `curl_cffi` enables yt-dlp's recommended browser impersonation for
+sites such as Instagram. This repository and image have not received a formal
+security audit. Update the
 pin deliberately after running offline, strict-network, and Docker smoke tests.
+
+### Instagram on Railway
+
+Portrait reels use their shorter edge as the quality (for example, `720×1280`
+is 720p). The bot uses yt-dlp's orientation-neutral `res` sorting, so these no
+longer fail as unavailable formats. Public reels normally require no account.
+If logs instead show an Instagram login redirect, empty-media response, 403, or
+rate limit, Railway's egress is being challenged. First retry later. If it is
+persistent, configure an authorized `INSTAGRAM_PROXY`. Instagram account
+cookies are deliberately unsupported so a shared account cannot expose private
+or followed-only posts. Private/login-only posts remain rejected.
 
 ## 5. File-size limit
 The standard Bot API caps incoming `getFile` downloads at **20 MB**

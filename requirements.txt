@@ -7,7 +7,7 @@ aiohttp==3.14.3
 # Feature D — downloading (Instagram / TikTok / YouTube)
 # Keep this tested security release pinned. The [default] extra installs the
 # matching yt-dlp-ejs challenge solver required for current YouTube support.
-yt-dlp[default]==2026.7.4
+yt-dlp[default,curl-cffi]==2026.7.4
 
 # Feature C — recognition (free, unofficial Shazam)
 shazamio==0.8.1

@@ -29,7 +29,24 @@ class Storage:
         await self._db.execute(
             "CREATE TABLE IF NOT EXISTS users ("
             " user_id INTEGER PRIMARY KEY,"
-            " locale TEXT)"
+            " locale TEXT,"
+            " is_active INTEGER NOT NULL DEFAULT 1,"
+            " deactivated_at TEXT)"
+        )
+        # Safe forward migration for the original two-column users table.
+        async with self._db.execute("PRAGMA table_info(users)") as cur:
+            user_columns = {row[1] for row in await cur.fetchall()}
+        if "is_active" not in user_columns:
+            await self._db.execute(
+                "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+            )
+        if "deactivated_at" not in user_columns:
+            await self._db.execute(
+                "ALTER TABLE users ADD COLUMN deactivated_at TEXT"
+            )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_broadcast "
+            "ON users(is_active, user_id)"
         )
         await self._db.execute(
             "CREATE TABLE IF NOT EXISTS audio_cache ("
@@ -67,6 +84,31 @@ class Storage:
             "CREATE INDEX IF NOT EXISTS idx_sessions_created_at "
             "ON sessions(created_at)"
         )
+        # Earlier releases only recorded users who selected a language. Recover
+        # every positive private owner ID still present in recognition/session
+        # rows so the first deployment does not start with an empty audience.
+        await self._db.execute(
+            "INSERT OR IGNORE INTO users (user_id) "
+            "SELECT DISTINCT owner_user_id FROM recognition_cache "
+            "WHERE owner_user_id IS NOT NULL AND owner_user_id > 0"
+        )
+        async with self._db.execute("SELECT data FROM sessions") as cur:
+            session_rows = await cur.fetchall()
+        recovered_user_ids: set[int] = set()
+        for (raw_data,) in session_rows:
+            try:
+                data = json.loads(raw_data)
+                owner_user_id = data.get("owner_user_id")
+                owner_user_id = int(owner_user_id)
+            except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if owner_user_id > 0:
+                recovered_user_ids.add(owner_user_id)
+        if recovered_user_ids:
+            await self._db.executemany(
+                "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+                ((user_id,) for user_id in sorted(recovered_user_ids)),
+            )
         await self._db.commit()
 
     async def close(self) -> None:
@@ -84,8 +126,72 @@ class Storage:
     async def set_locale(self, user_id: int, locale: str) -> None:
         await self._db.execute(
             "INSERT INTO users (user_id, locale) VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET locale = excluded.locale",
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "locale = excluded.locale, is_active = 1, deactivated_at = NULL",
             (user_id, locale),
+        )
+        await self._db.commit()
+
+    async def touch_private_user(self, user_id: int) -> str | None:
+        """Register a private user once and reactivate them when they return.
+
+        Active repeat users take a read-only path, avoiding a volume commit on
+        every update. Telegram does not expose a historical bot-user list, so
+        tracking private interactions is the authoritative broadcast audience.
+        """
+        async with self._db.execute(
+            "SELECT locale, is_active FROM users WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            await self._db.execute(
+                "INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,)
+            )
+            await self._db.commit()
+            return None
+        locale, is_active = row
+        if not is_active:
+            await self._db.execute(
+                "UPDATE users SET is_active = 1, deactivated_at = NULL "
+                "WHERE user_id = ?",
+                (user_id,),
+            )
+            await self._db.commit()
+        return locale
+
+    async def get_active_user_ids(
+        self, *, after_user_id: int = 0, limit: int = 500,
+        exclude_user_id: int | None = None,
+    ) -> list[int]:
+        """Return one keyset-paged broadcast batch in stable user-ID order."""
+        limit = max(1, min(int(limit), 1000))
+        if exclude_user_id is None:
+            query = (
+                "SELECT user_id FROM users "
+                "WHERE is_active = 1 AND user_id > ? "
+                "ORDER BY user_id LIMIT ?"
+            )
+            params = (after_user_id, limit)
+        else:
+            query = (
+                "SELECT user_id FROM users "
+                "WHERE is_active = 1 AND user_id > ? AND user_id != ? "
+                "ORDER BY user_id LIMIT ?"
+            )
+            params = (after_user_id, exclude_user_id, limit)
+        async with self._db.execute(query, params) as cur:
+            rows = await cur.fetchall()
+        return [int(row[0]) for row in rows]
+
+    async def mark_users_inactive(self, user_ids: list[int]) -> None:
+        """Stop future broadcasts to blocked/deactivated Telegram accounts."""
+        unique_ids = sorted({int(user_id) for user_id in user_ids if user_id > 0})
+        if not unique_ids:
+            return
+        await self._db.executemany(
+            "UPDATE users SET is_active = 0, deactivated_at = datetime('now') "
+            "WHERE user_id = ?",
+            ((user_id,) for user_id in unique_ids),
         )
         await self._db.commit()
 

@@ -172,7 +172,11 @@ def _search_sync(query: str, limit: int) -> list[SearchItem]:
     if not query:
         return []
     limit = max(1, min(int(limit), 30))
-    opts = {**_base_opts(), "extract_flat": True, "noplaylist": True}
+    opts = {
+        **_base_opts(_YOUTUBE_PROVIDER_URL),
+        "extract_flat": True,
+        "noplaylist": True,
+    }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
     return _entries_to_items(info.get("entries"))

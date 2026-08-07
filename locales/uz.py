@@ -19,7 +19,8 @@ STRINGS = {
     "btn_privacy_policy": "Toʻliq maxfiylik siyosati",
     "privacy_notice": (
         "🔐 <b>Maxfiylik</b>\n\n"
-        "Bot Telegram foydalanuvchi ID raqamingiz va tilingizni oʻchirilguncha; "
+        "Bot Telegram foydalanuvchi ID raqamingiz va tilingizni oʻchirilguncha, "
+        "jumladan bot eʼlonlarini yuborish uchun; "
         "tugma/qidiruv sessiyalarini 7 kungacha; musiqa aniqlash natijalarini "
         "30 kungacha saqlaydi. Umumiy Telegram file_id qiymatlari uzoqroq "
         "saqlanishi mumkin. Yuklangan media va namunalar ishlovdan soʻng mahalliy "
@@ -30,6 +31,11 @@ STRINGS = {
         "ID raqamingizga bogʻliq maʼlumotlarni oʻchirish uchun /delete_my_data dan foydalaning."
     ),
     "data_deleted": "✅ Foydalanuvchi ID raqamingizga bogʻliq maʼlumotlar oʻchirildi.",
+    "broadcast_done": (
+        "✅ Eʼlon yakunlandi. Yuborildi: {sent}. "
+        "Faol emas: {inactive}. Xato: {failed}."
+    ),
+    "broadcast_unsupported": "⚠️ Telegram bu xabar turini nusxalay olmaydi.",
     # Feature D — links
     "fetching": "🔎 Maʼlumot olinmoqda...",
     "choose_quality": "🎬 Sifatni tanlang:",

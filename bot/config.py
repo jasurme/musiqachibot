@@ -38,6 +38,12 @@ class Config:
     search_max_seconds: int = 1200
     search_cache_seconds: int = 3600
     privacy_policy_url: str | None = None
+    # Messages sent to the bot by this private-chat user are copied to every
+    # active private user. Keep the default requested by the bot operator while
+    # allowing an environment override for future ownership changes.
+    admin_user_id: int = 7645204689
+    # Stay below Telegram's documented bulk-send ceiling and send sequentially.
+    broadcast_rate_per_second: int = 20
 
 
 def _clean(value: str | None) -> str | None:
@@ -116,10 +122,16 @@ def load_config() -> Config:
     heavy_job_concurrency = _positive_int("HEAVY_JOB_CONCURRENCY", 3)
     search_max_seconds = _positive_int("SEARCH_MAX_SECONDS", 1200)
     search_cache_seconds = _nonnegative_int("SEARCH_CACHE_SECONDS", 3600)
+    admin_user_id = _positive_int("ADMIN_USER_ID", 7645204689)
+    broadcast_rate_per_second = _positive_int(
+        "BROADCAST_RATE_PER_SECOND", 20
+    )
     if ytdlp_concurrency > 8:
         raise RuntimeError("YTDLP_CONCURRENCY cannot exceed 8")
     if heavy_job_concurrency > 8:
         raise RuntimeError("HEAVY_JOB_CONCURRENCY cannot exceed 8")
+    if broadcast_rate_per_second > 25:
+        raise RuntimeError("BROADCAST_RATE_PER_SECOND cannot exceed 25")
     if ytdlp_sleep_requests >= min(
         ytdlp_job_timeout_seconds, ytdlp_metadata_timeout_seconds
     ):
@@ -155,4 +167,6 @@ def load_config() -> Config:
         search_max_seconds=search_max_seconds,
         search_cache_seconds=search_cache_seconds,
         privacy_policy_url=_clean(os.getenv("PRIVACY_POLICY_URL")),
+        admin_user_id=admin_user_id,
+        broadcast_rate_per_second=broadcast_rate_per_second,
     )

@@ -123,13 +123,14 @@ def _private_worker_env(job_dir: str) -> dict[str, str]:
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
         "http_proxy", "https_proxy", "all_proxy", "no_proxy",
         "YTDLP_PROXY", "YTDLP_PLAYER_CLIENT", "YTDLP_SLEEP_REQUESTS",
+        "INSTAGRAM_PROXY",
         "YTDLP_JOB_TIMEOUT_SECONDS", "YTDLP_METADATA_TIMEOUT_SECONDS",
         "DOWNLOAD_MAX_SECONDS", "SEARCH_MAX_SECONDS",
     }
     env = {key: value for key, value in os.environ.items() if key in passthrough}
     cookie_file = os.getenv("YTDLP_COOKIES_FILE")
     if cookie_file and os.path.isfile(cookie_file):
-        private_cookie = os.path.join(job_dir, "cookies.txt")
+        private_cookie = os.path.join(job_dir, "youtube-cookies.txt")
         shutil.copyfile(cookie_file, private_cookie)
         os.chmod(private_cookie, 0o600)
         env["YTDLP_COOKIES_FILE"] = private_cookie
@@ -499,6 +500,11 @@ def runtime_warnings() -> list[str]:
         warnings.append(
             "yt-dlp-ejs is missing; install yt-dlp with the [default] extra"
         )
+    if importlib.util.find_spec("curl_cffi") is None:
+        warnings.append(
+            "curl_cffi is missing; Instagram/browser-impersonation extraction "
+            "may be blocked"
+        )
     cookie_file = os.getenv("YTDLP_COOKIES_FILE")
     if cookie_file and not os.path.isfile(cookie_file):
         warnings.append(f"YTDLP_COOKIES_FILE does not exist: {cookie_file}")
@@ -529,7 +535,8 @@ def download_error_key(exc: BaseException) -> str:
     message = str(exc).lower()
     if any(part in message for part in (
         "private video", "private account", "login to view", "members-only",
-        "private or authenticated media",
+        "private or authenticated media", "login required", "restricted video",
+        "only available for registered users who follow this account",
     )):
         return "download_private"
     if any(part in message for part in (
@@ -540,12 +547,16 @@ def download_error_key(exc: BaseException) -> str:
     if "media provider queue is busy" in message:
         return "service_busy"
     if any(part in message for part in (
+        "http error 429", "too many requests", "rate limit", "rate-limit",
+    )):
+        return "download_rate_limited"
+    if any(part in message for part in (
         "sign in to confirm", "not a bot", "cookies are required",
-        "login required", "http error 403", "bot-checked",
+        "http error 403", "bot-checked",
+        "instagram api is not granting access",
+        "redirected to the login page",
     )):
         return "download_blocked"
-    if any(part in message for part in ("http error 429", "too many requests", "rate limit")):
-        return "download_rate_limited"
     return "download_failed"
 
 
@@ -553,6 +564,11 @@ def provider_name(url: str) -> str:
     host = (urlparse(url).hostname or "unknown").lower().removeprefix("www.")
     if host == "youtu.be" or host.endswith(".youtube.com") or host == "youtube.com":
         return "youtube"
+    if (
+        host in {"instagr.am", "instagram.com", "cdninstagram.com"}
+        or host.endswith((".instagram.com", ".cdninstagram.com"))
+    ):
+        return "instagram"
     return host
 
 
@@ -582,11 +598,14 @@ def telegram_media_cache_key(
     bot_id: int, url: str, quality: str, *, media_id: str | None = None,
 ) -> str:
     """Canonicalize YouTube audio so search and direct links share file_ids."""
-    if quality == "audio" and provider_name(url) == "youtube":
+    provider = provider_name(url)
+    if quality == "audio" and provider == "youtube":
         stable_id = media_id or youtube_video_id(url)
         if stable_id:
             # Preserve the existing namespace so deployed cache rows remain hot.
             return f"bot:{bot_id}:ytaudio:{stable_id}"
+    if provider == "instagram" and media_id:
+        return f"bot:{bot_id}:dl:instagram:{media_id}:{quality}"
     return f"bot:{bot_id}:dl:{url}:{quality}"
 
 
@@ -632,17 +651,27 @@ def clear_provider_failures() -> None:
     _BLOCKED_UNTIL.clear()
 
 
-def _net_opts() -> dict:
+def _net_opts(target: str | None = None) -> dict:
     """Optional yt-dlp network options from env — essential on cloud/datacenter
-    hosts (Railway etc.) where YouTube blocks bare requests.
+    hosts (Railway etc.) where providers block bare requests.
       YTDLP_COOKIES_FILE : path to a Netscape cookies.txt (export from a browser)
       YTDLP_PROXY        : authorized stable proxy URL with unblocked egress
+      INSTAGRAM_PROXY    : optional Instagram-specific proxy override
     """
     opts: dict = {}
-    cookies = os.getenv("YTDLP_COOKIES_FILE")
+    provider = provider_name(target) if target else None
+    cookies = None
+    proxy = None
+    if provider == "instagram":
+        # Never authenticate the shared downloader to Instagram: logged-in
+        # extraction can expose followed/private media without a dependable
+        # yt-dlp availability flag. The bot deliberately handles public posts.
+        proxy = os.getenv("INSTAGRAM_PROXY") or os.getenv("YTDLP_PROXY")
+    else:
+        cookies = os.getenv("YTDLP_COOKIES_FILE")
+        proxy = os.getenv("YTDLP_PROXY")
     if cookies and os.path.exists(cookies):
         opts["cookiefile"] = cookies
-    proxy = os.getenv("YTDLP_PROXY")
     if proxy:
         opts["proxy"] = proxy
     # This advanced override is intentionally disabled with cookies. yt-dlp's
@@ -651,7 +680,7 @@ def _net_opts() -> dict:
     # production. A cookieless deployment may still follow current upstream
     # guidance and opt into a specific client.
     clients = os.getenv("YTDLP_PLAYER_CLIENT")
-    if clients and "cookiefile" not in opts:
+    if clients and provider in {None, "youtube"} and "cookiefile" not in opts:
         opts["extractor_args"] = {
             "youtube": {"player_client": [c.strip() for c in clients.split(",") if c.strip()]}
         }
@@ -677,7 +706,7 @@ def _net_opts() -> dict:
     return opts
 
 
-def _base_opts() -> dict:
+def _base_opts(target: str | None = None) -> dict:
     return {
         "quiet": True,
         # Keep progress quiet, but route actionable extractor/EJS/PO-token
@@ -689,7 +718,7 @@ def _base_opts() -> dict:
         "fragment_retries": 3,
         "extractor_retries": 3,
         "socket_timeout": 30,
-        **_net_opts(),
+        **_net_opts(target),
     }
 
 
@@ -818,18 +847,47 @@ def _publish_staged_download(
     return result
 
 
+def _probe_telegram_mp4_codecs(path: str) -> bool:
+    """Inspect completed media when extractor codec metadata is incomplete."""
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries",
+                "stream=codec_type,codec_name", "-of", "json", path,
+            ],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        streams = json.loads(completed.stdout).get("streams") or []
+    except (OSError, json.JSONDecodeError, subprocess.SubprocessError):
+        return False
+    video_codecs = {
+        str(stream.get("codec_name") or "").lower()
+        for stream in streams if stream.get("codec_type") == "video"
+    }
+    audio_codecs = {
+        str(stream.get("codec_name") or "").lower()
+        for stream in streams if stream.get("codec_type") == "audio"
+    }
+    return bool(video_codecs) and all(
+        codec in {"h264", "avc1"} for codec in video_codecs
+    ) and all(codec in {"aac", "mp4a"} for codec in audio_codecs)
+
+
 def _is_telegram_mp4(info: dict, path: str) -> bool:
     if Path(path).suffix.lower() != ".mp4":
         return False
     formats = info.get("requested_formats") or [info]
-    video_codecs = {
-        str(item.get("vcodec") or "none").lower() for item in formats
-        if item.get("vcodec") not in {None, "none"}
-    }
-    audio_codecs = {
-        str(item.get("acodec") or "none").lower() for item in formats
-        if item.get("acodec") not in {None, "none"}
-    }
+    video_values = [str(item.get("vcodec") or "").lower() for item in formats]
+    audio_values = [str(item.get("acodec") or "").lower() for item in formats]
+    video_codecs = {codec for codec in video_values if codec not in {"", "none", "unknown"}}
+    audio_codecs = {codec for codec in audio_values if codec not in {"", "none", "unknown"}}
+    metadata_incomplete = (
+        not video_codecs
+        or any(codec == "unknown" for codec in video_values + audio_values)
+        or (not audio_codecs and not all(codec == "none" for codec in audio_values))
+    )
+    if metadata_incomplete:
+        return _probe_telegram_mp4_codecs(path)
     video_ok = bool(video_codecs) and all(
         codec.startswith(("avc1", "h264")) for codec in video_codecs
     )
@@ -944,6 +1002,18 @@ def _ensure_telegram_audio(
     return _ensure_mp3(source, work_dir, max_bytes, expected_duration)
 
 
+def _format_resolution(format_info: dict) -> int | None:
+    """Return yt-dlp's orientation-neutral ``res`` (the shorter edge)."""
+    try:
+        width = int(format_info.get("width") or 0)
+        height = int(format_info.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    if width > 0 and height > 0:
+        return min(width, height)
+    return height or width or None
+
+
 # ── metadata only (no download) ──────────────────────────
 async def extract_meta(url: str) -> MediaMeta:
     payload = await _run_provider_process("extract_meta", url)
@@ -959,14 +1029,16 @@ def _extract_meta_sync(url: str) -> MediaMeta:
     if not is_supported_url(url):
         raise ValueError("unsupported media URL")
     opts = {
-        **_base_opts(), "noplaylist": True, "skip_download": True,
+        **_base_opts(url), "noplaylist": True, "skip_download": True,
         "match_filter": _reject_unbounded_media,
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = _first_entry(ydl.extract_info(url, download=False))
-    heights = sorted(
-        {int(f["height"]) for f in (info.get("formats") or []) if f.get("height")}
-    )
+    heights = sorted({
+        resolution
+        for item in (info.get("formats") or [])
+        if (resolution := _format_resolution(item)) is not None
+    })
     return MediaMeta(
         url=info.get("webpage_url") or url,
         title=info.get("title") or "",
@@ -1001,19 +1073,41 @@ def _download_quality_sync(
         raise ValueError("unsupported media URL")
     if max_height <= 0:
         raise ValueError("max_height must be positive")
+    if provider_name(url) == "instagram":
+        # Instagram's progressive MP4 is normally already H.264/AAC. Prefer it
+        # over separate DASH streams to avoid a full VP9→H.264 transcode, which
+        # can turn a short reel into a minute-long response on Railway CPUs.
+        format_selector = (
+            "best[ext=mp4]/"
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo+bestaudio/"
+            "best/"
+            "bestvideo[ext=mp4]/"
+            "bestvideo"
+        )
+    else:
+        format_selector = (
+            "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
+            "best[ext=mp4][vcodec^=avc1]/"
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+            "best[ext=mp4]/"
+            "bestvideo+bestaudio/"
+            "best/"
+            "bestvideo[ext=mp4]/"
+            "bestvideo"
+        )
     os.makedirs(out_dir, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".musiqa_video_", dir=out_dir) as work_dir:
         opts = {
-            **_base_opts(),
+            **_base_opts(url),
             **_source_limit_opts(max_bytes),
             "outtmpl": os.path.join(work_dir, "%(id)s.%(ext)s"),
-            "format": (
-                f"bestvideo[height<={max_height}][ext=mp4][vcodec^=avc1]"
-                "+bestaudio[ext=m4a]/"
-                f"best[height<={max_height}][ext=mp4][vcodec^=avc1]/"
-                f"bestvideo[height<={max_height}]+bestaudio/"
-                f"best[height<={max_height}]"
-            ),
+            # yt-dlp defines ``res`` as the shorter video edge, so this works
+            # for both landscape YouTube clips and portrait Instagram reels.
+            # If no format is at/below the requested tier it selects the
+            # smallest available fallback instead of rejecting the download.
+            "format_sort": [f"res:{max_height}", "ext:mp4:m4a"],
+            "format": format_selector,
             "merge_output_format": "mp4",
             "noplaylist": True,
             "match_filter": _reject_unbounded_media,
@@ -1070,7 +1164,7 @@ def _download_audio_sync(
     os.makedirs(out_dir, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".musiqa_audio_", dir=out_dir) as work_dir:
         opts = {
-            **_base_opts(),
+            **_base_opts(target),
             **_source_limit_opts(max_bytes),
             "outtmpl": os.path.join(work_dir, "%(id)s.%(ext)s"),
             "format": _AUDIO_FORMAT_SELECTOR,

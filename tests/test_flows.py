@@ -3,8 +3,9 @@ import asyncio
 import os
 
 import pytest
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 
-from bot.handlers import results, url_download
+from bot.handlers import broadcast, results, url_download
 from bot import jobs
 from bot.services import downloader
 from bot.services.downloader import DownloadResult, MediaMeta
@@ -12,11 +13,15 @@ from bot.services.recognizer import Track
 from bot.services.search import SearchItem
 from tests.conftest import (
     callback_update,
+    document_update,
     first_callback_data,
     text_update,
     video_update,
+    video_note_update,
     voice_update,
 )
+
+ADMIN_ID = 7645204689
 
 
 def _fake_note(config):
@@ -52,6 +57,7 @@ async def test_delete_my_data_purges_db_and_memory(
     await dp.feed_update(bot, text_update("/delete_my_data"))
 
     assert await storage.get_locale(100) is None
+    assert 100 not in await storage.get_active_user_ids()
     assert await storage.get_session("persisted") is None
     assert "result" not in results._SESS
     assert "download" not in url_download._PENDING
@@ -68,6 +74,208 @@ def _fake_dl(config, counter):
             f.write(b"0" * 20000)
         return DownloadResult(path=p, title="Ummon - Song 0", uploader="ch", duration=200, ext="mp3")
     return fake
+
+
+# ── administrator broadcast ─────────────────────────────
+@pytest.mark.parametrize(
+    "make_update",
+    [
+        pytest.param(
+            lambda: text_update(
+                "Service announcement", user_id=ADMIN_ID, chat_id=ADMIN_ID
+            ),
+            id="text",
+        ),
+        pytest.param(
+            lambda: video_update(user_id=ADMIN_ID, chat_id=ADMIN_ID),
+            id="video",
+        ),
+        pytest.param(
+            lambda: video_note_update(user_id=ADMIN_ID, chat_id=ADMIN_ID),
+            id="video-note",
+        ),
+        pytest.param(
+            lambda: document_update(user_id=ADMIN_ID, chat_id=ADMIN_ID),
+            id="document",
+        ),
+    ],
+)
+async def test_admin_private_content_is_copied_to_every_active_user(
+    dp, bot, cap, storage, monkeypatch, make_update,
+):
+    for user_id in (101, 202, ADMIN_ID):
+        await storage.touch_private_user(user_id)
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(broadcast.asyncio, "sleep", no_wait)
+    update = make_update()
+    await dp.feed_update(bot, update)
+
+    copies = cap.by("CopyMessage")
+    assert [method.chat_id for method in copies] == [101, 202]
+    assert all(method.from_chat_id == ADMIN_ID for method in copies)
+    assert all(method.message_id == update.message.message_id for method in copies)
+    assert cap.by("ForwardMessage") == []
+    summary = cap.last("SendMessage")
+    assert "Sent: 2" in summary.text and "Failed: 0" in summary.text
+
+
+async def test_admin_broadcast_preempts_normal_link_and_search_handlers(
+    dp, bot, cap, storage, monkeypatch,
+):
+    await storage.touch_private_user(101)
+
+    async def forbidden_provider_call(*args, **kwargs):
+        raise AssertionError("admin announcement reached a provider handler")
+
+    monkeypatch.setattr(downloader, "extract_meta", forbidden_provider_call)
+    monkeypatch.setattr(
+        "bot.handlers.text_search.search_tracks", forbidden_provider_call
+    )
+    await dp.feed_update(
+        bot,
+        text_update(
+            "https://www.instagram.com/reel/example/",
+            user_id=ADMIN_ID,
+            chat_id=ADMIN_ID,
+        ),
+    )
+
+    assert len(cap.by("CopyMessage")) == 1
+    assert url_download._PENDING == {}
+
+
+async def test_private_user_is_registered_even_for_unhandled_document(
+    dp, bot, cap, storage,
+):
+    await dp.feed_update(bot, document_update(user_id=909, chat_id=909))
+    assert await storage.get_active_user_ids() == [909]
+    assert cap.methods == []
+
+
+async def test_group_user_and_group_admin_are_not_broadcast_registered(
+    dp, bot, cap, storage,
+):
+    await dp.feed_update(
+        bot,
+        text_update(
+            "announcement", user_id=ADMIN_ID, chat_id=-100,
+            chat_type="supergroup",
+        ),
+    )
+    assert cap.by("CopyMessage") == []
+    assert await storage.get_active_user_ids() == []
+
+
+async def test_broadcast_deactivates_blocked_user_and_continues(
+    dp, bot, cap, storage, monkeypatch,
+):
+    for user_id in (101, 202):
+        await storage.touch_private_user(user_id)
+    attempted: list[int] = []
+    original_request = bot.session.make_request
+
+    async def request_with_block(bot_, method, timeout=None):
+        if type(method).__name__ == "CopyMessage":
+            attempted.append(method.chat_id)
+            if method.chat_id == 101:
+                raise TelegramForbiddenError(
+                    method, "Forbidden: bot was blocked by the user"
+                )
+        return await original_request(bot_, method, timeout=timeout)
+
+    async def no_wait(_seconds):
+        return None
+
+    bot.session.make_request = request_with_block
+    monkeypatch.setattr(broadcast.asyncio, "sleep", no_wait)
+    await dp.feed_update(
+        bot,
+        text_update("Notice", user_id=ADMIN_ID, chat_id=ADMIN_ID),
+    )
+
+    assert attempted == [101, 202]
+    assert await storage.get_active_user_ids() == [202, ADMIN_ID]
+
+    attempted.clear()
+    await dp.feed_update(
+        bot,
+        text_update("Second", uid=2, user_id=ADMIN_ID, chat_id=ADMIN_ID),
+    )
+    assert attempted == [202]
+
+
+async def test_broadcast_retries_same_user_after_flood_wait(
+    dp, bot, cap, storage, monkeypatch,
+):
+    await storage.touch_private_user(101)
+    attempts = 0
+    sleeps: list[float] = []
+    original_request = bot.session.make_request
+
+    async def request_with_retry(bot_, method, timeout=None):
+        nonlocal attempts
+        if type(method).__name__ == "CopyMessage":
+            attempts += 1
+            if attempts == 1:
+                raise TelegramRetryAfter(method, "Too Many Requests", retry_after=2)
+        return await original_request(bot_, method, timeout=timeout)
+
+    async def record_sleep(seconds):
+        sleeps.append(seconds)
+
+    bot.session.make_request = request_with_retry
+    monkeypatch.setattr(broadcast.asyncio, "sleep", record_sleep)
+    await dp.feed_update(
+        bot,
+        text_update("Notice", user_id=ADMIN_ID, chat_id=ADMIN_ID),
+    )
+
+    assert attempts == 2
+    assert any(seconds >= 2 for seconds in sleeps)
+
+
+async def test_broadcast_voice_privacy_error_does_not_deactivate_user(
+    dp, bot, storage, monkeypatch,
+):
+    await storage.touch_private_user(101)
+    original_request = bot.session.make_request
+
+    async def request_with_voice_privacy(bot_, method, timeout=None):
+        if type(method).__name__ == "CopyMessage":
+            raise TelegramForbiddenError(
+                method, "Forbidden: VOICE_MESSAGES_FORBIDDEN"
+            )
+        return await original_request(bot_, method, timeout=timeout)
+
+    async def no_wait(_seconds):
+        return None
+
+    bot.session.make_request = request_with_voice_privacy
+    monkeypatch.setattr(broadcast.asyncio, "sleep", no_wait)
+    await dp.feed_update(
+        bot,
+        video_note_update(user_id=ADMIN_ID, chat_id=ADMIN_ID),
+    )
+
+    assert await storage.get_active_user_ids() == [101, ADMIN_ID]
+
+
+async def test_admin_unsupported_message_type_stops_before_audience(
+    dp, bot, cap, storage,
+):
+    await storage.touch_private_user(101)
+    update = text_update("placeholder", user_id=ADMIN_ID, chat_id=ADMIN_ID)
+    update = update.model_copy(
+        update={"message": update.message.model_copy(update={"text": None})}
+    )
+
+    await dp.feed_update(bot, update)
+
+    assert cap.by("CopyMessage") == []
+    assert "cannot copy" in cap.last("SendMessage").text
 
 
 # ── /start & language ────────────────────────────────────

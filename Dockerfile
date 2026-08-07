@@ -32,6 +32,7 @@ COPY . .
 # cannot solve the JavaScript challenges needed to download media.
 RUN deno --version \
     && python -c "import yt_dlp_ejs" \
+    && python -c "import curl_cffi" \
     && groupadd --system --gid 101 musiqa \
     && useradd --system --uid 101 --gid 101 --home-dir /app \
         --no-create-home --shell /usr/sbin/nologin musiqa \
