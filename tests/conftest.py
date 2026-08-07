@@ -36,6 +36,7 @@ from bot.db.storage import Storage
 from bot.handlers import (
     broadcast,
     media_recognize,
+    music_campaigns,
     results,
     round as round_handler,
     start,
@@ -46,7 +47,8 @@ from bot.handlers import (
 from bot.middlewares.i18n import I18nMiddleware
 
 FAKE_TOKEN = "123456:FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE"
-ALL_ROUTERS = (broadcast.router, top_music.router, round_handler.router, start.router, url_download.router,
+ALL_ROUTERS = (broadcast.router, top_music.router, music_campaigns.router,
+               round_handler.router, start.router, url_download.router,
                media_recognize.router, text_search.router, results.router)
 
 

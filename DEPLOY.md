@@ -47,11 +47,11 @@ DB resets each deploy → language prefs, the `file_id` cache, and button sessio
 
 That's it — the app writes its DB there and it persists.
 
-The same database stores the last complete Top 10, the two-day refresh clock,
-pending automatic-announcement cursor, admin video confirmation drafts, and
-the cursor for every administrator announcement. Without the volume,
-`/top_music` must be rebuilt after every deployment and partially delivered
-announcements cannot resume.
+The same database stores the last complete Top 10, all weekly music and mood
+snapshots, ranking history, notification preferences, durable campaign cursors,
+admin video confirmation drafts, and every administrator-announcement cursor.
+Without the volume, the stored lists must be rebuilt after every deployment and
+partially delivered announcements cannot resume.
 
 ### Admin video announcements and Top 10
 
@@ -65,9 +65,16 @@ Music chart as ten direct track-download buttons.
 The Top 10 source is Apple’s official unauthenticated Uzbekistan Top Songs RSS
 feed. Refresh/search work runs in the background; opening `/top_music` or its
 media button performs no provider request. Only a complete ten-track snapshot
-replaces the previous one, and an unchanged chart is not broadcast again. Keep
-one Railway replica and retain `overlapSeconds=0` so only one scheduler owns
-the SQLite state and Telegram polling.
+replaces the previous one.
+
+The bot also prepares New Music, Rising, Discoveries, and five ten-track mood
+lists off the request path. The three proactive categories are sent at most
+once in their Asia/Tashkent weekly slots (Monday, conditional Wednesday, and
+Friday), respect `/notifications`, and resume from SQLite after a restart. Mood
+lists refresh weekly but are opened on demand, preventing five extra broadcasts.
+The first reliable Rising comparison needs about one week of retained chart
+history. Keep one Railway replica and retain `overlapSeconds=0` so one scheduler
+owns SQLite campaign leases and Telegram polling.
 
 ## 4. ⚠️ Fix Railway's YouTube bot-check
 

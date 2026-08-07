@@ -235,6 +235,7 @@ async def refresh_top_music_once(
     searcher: Callable[[str, int], Awaitable[list[SearchItem]]] | None = None,
     refresh_seconds: int = REFRESH_INTERVAL_SECONDS,
     retry_base_seconds: int = 30 * 60,
+    queue_broadcast: bool = True,
 ) -> bool:
     """Refresh a due/empty snapshot once; return whether its ranking changed."""
     timestamp = int(time.time()) if now is None else int(now)
@@ -259,6 +260,14 @@ async def refresh_top_music_once(
             audience_upper_bound=audience_upper_bound,
             refresh_seconds=refresh_seconds,
         )
+        if changed and not queue_broadcast:
+            # The generalized music cadence owns proactive notifications. Keep
+            # Top Music's fast 48-hour snapshot refresh without adding another
+            # three or four messages per week on top of that cadence.
+            published = await db.get_top_music_state()
+            pending_generation = published.get("pending_generation")
+            if pending_generation is not None:
+                await db.complete_top_music_broadcast(pending_generation)
         logger.info(
             "Top 10 refresh completed changed=%s generation=%s",
             str(changed).lower(),
@@ -346,17 +355,22 @@ def _scheduler_delay(state: dict, now: int) -> float:
 
 
 async def run_top_music_scheduler(bot: Bot, db, config) -> None:
-    """Run restart-aware refresh and broadcast work until cancelled."""
+    """Refresh the instant Top Music snapshot without proactive fan-out."""
     logger.info(
         "Top 10 scheduler started source_country=uz interval_hours=%s",
         config.top_music_refresh_hours,
     )
     while True:
         try:
-            if await broadcast_pending_top_music(bot, db, config):
-                continue
-
             state = await db.get_top_music_state()
+            # Drain a pending generation left by an older deployment. The
+            # snapshot remains available; only its obsolete automatic fan-out
+            # is retired in favour of the weekly campaign cadence.
+            if state["pending_generation"] is not None:
+                await db.complete_top_music_broadcast(
+                    state["pending_generation"]
+                )
+                state = await db.get_top_music_state()
             now = int(time.time())
             if len(state["items"]) != 10 or state["next_refresh_at"] <= now:
                 await refresh_top_music_once(
@@ -364,10 +378,9 @@ async def run_top_music_scheduler(bot: Bot, db, config) -> None:
                     now=now,
                     refresh_seconds=config.top_music_refresh_hours * 60 * 60,
                     retry_base_seconds=config.top_music_retry_minutes * 60,
+                    queue_broadcast=False,
                 )
                 state = await db.get_top_music_state()
-                if state["pending_generation"] is not None:
-                    continue
                 now = int(time.time())
             await asyncio.sleep(_scheduler_delay(state, now))
         except asyncio.CancelledError:

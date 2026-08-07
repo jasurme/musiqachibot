@@ -14,6 +14,11 @@ STRINGS = {
     "cmd_start": "Запустить бота",
     "cmd_round": "Сделать кружочек",
     "cmd_top_music": "Top Music",
+    "cmd_new_music": "Новая музыка",
+    "cmd_rising": "Набирают популярность",
+    "cmd_discoveries": "Открытия недели",
+    "cmd_moods": "Музыка по настроению",
+    "cmd_notifications": "Музыкальные уведомления",
     "cmd_lang": "Изменить язык",
     "cmd_privacy": "Информация о конфиденциальности",
     "cmd_delete_my_data": "Удалить сохранённые данные",
@@ -27,7 +32,9 @@ STRINGS = {
         "образцы удаляются локально после обработки.\n\n"
         "Короткие образцы или метаданные могут обрабатываться Shazam/AudD; поиск "
         "и загрузка обращаются к исходным сервисам; запросы текстов — к lyrics.ovh; "
-        "Railway и настроенный прокси обрабатывают сетевой трафик. Используйте "
+        "Railway и настроенный прокси обрабатывают сетевой трафик. Управлять "
+        "периодическими музыкальными уведомлениями можно через /notifications. "
+        "Используйте "
         "/delete_my_data, чтобы удалить данные, связанные с вашим ID."
     ),
     "data_deleted": "✅ Данные, связанные с вашим Telegram ID, удалены.",
@@ -53,6 +60,40 @@ STRINGS = {
     "top_music_unavailable": (
         "⚠️ Top Music пока не готов. Попробуйте ещё раз немного позже."
     ),
+    "new_music_header": "<b>🔥 Новая музыка</b>",
+    "rising_header": "<b>🚀 Набирают популярность</b>",
+    "discoveries_header": "<b>💎 Открытия недели</b>",
+    "moods_header": "<b>🎭 Выберите настроение</b>",
+    "mood_night": "🌙 Ночной вайб",
+    "mood_road": "🚗 В дорогу",
+    "mood_workout": "🏋️ Для тренировки",
+    "mood_calm": "💔 Спокойные песни",
+    "mood_weekend": "🎉 Для отдыха",
+    "mood_night_header": "<b>🌙 Ночной вайб</b>",
+    "mood_road_header": "<b>🚗 В дорогу</b>",
+    "mood_workout_header": "<b>🏋️ Для тренировки</b>",
+    "mood_calm_header": "<b>💔 Спокойные песни</b>",
+    "mood_weekend_header": "<b>🎉 Для отдыха</b>",
+    "music_campaign_unavailable": (
+        "⚠️ Этот список пока не готов. Попробуйте ещё раз немного позже."
+    ),
+    "btn_back": "⬅️ Назад",
+    "btn_open_moods": "🎭 Музыка по настроению",
+    "btn_notifications_off": "🔕 Отключить",
+    "btn_notification_settings": "⚙️ Настроить",
+    "notifications_header": (
+        "<b>🔔 Музыкальные уведомления</b>\n"
+        "Выберите, какие обновления получать:"
+    ),
+    "notification_new_music": "Новая музыка",
+    "notification_rising": "Набирают популярность",
+    "notification_discoveries": "Открытия недели",
+    "btn_notifications_all_on": "🔔 Включить все",
+    "btn_notifications_all_off": "🔕 Отключить все",
+    "notifications_saved": "✅ Сохранено.",
+    "notifications_category_disabled": "🔕 Уведомления «{name}» отключены.",
+    "notifications_all_enabled": "🔔 Все музыкальные уведомления включены.",
+    "notifications_all_disabled": "🔕 Все музыкальные уведомления отключены.",
     # Feature D — links
     "fetching": "🔎 Получаю информацию...",
     "choose_quality": "🎬 Выберите качество:",

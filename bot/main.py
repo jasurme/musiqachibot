@@ -15,6 +15,7 @@ from bot.db.storage import Storage
 from bot.handlers import (
     broadcast,
     media_recognize,
+    music_campaigns,
     results,
     round as round_handler,
     start,
@@ -29,6 +30,7 @@ from bot.services.downloader import (
     runtime_warnings,
     shutdown_provider_workers,
 )
+from bot.services.music_campaigns import run_music_campaign_scheduler
 from bot.services.top_music import run_top_music_scheduler
 
 logging.basicConfig(
@@ -94,6 +96,18 @@ async def _set_commands(bot: Bot, default_locale: str) -> None:
             BotCommand(
                 command="top_music", description=t("cmd_top_music", locale)
             ),
+            BotCommand(
+                command="new_music", description=t("cmd_new_music", locale)
+            ),
+            BotCommand(command="rising", description=t("cmd_rising", locale)),
+            BotCommand(
+                command="discoveries", description=t("cmd_discoveries", locale)
+            ),
+            BotCommand(command="moods", description=t("cmd_moods", locale)),
+            BotCommand(
+                command="notifications",
+                description=t("cmd_notifications", locale),
+            ),
             BotCommand(command="lang", description=t("cmd_lang", locale)),
             BotCommand(command="privacy", description=t("cmd_privacy", locale)),
             BotCommand(
@@ -119,6 +133,7 @@ async def main() -> None:
     storage: Storage | None = None
     admin_broadcast_task: asyncio.Task | None = None
     top_music_task: asyncio.Task | None = None
+    music_campaign_task: asyncio.Task | None = None
     try:
         removed = cleanup_stale_runtime_files(config.download_dir)
         if removed:
@@ -161,6 +176,7 @@ async def main() -> None:
         # round is state-filtered, and URL must precede catch-all text search.
         dp.include_router(broadcast.router)
         dp.include_router(top_music.router)
+        dp.include_router(music_campaigns.router)
         dp.include_router(round_handler.router)
         dp.include_router(start.router)
         dp.include_router(url_download.router)
@@ -190,6 +206,10 @@ async def main() -> None:
             run_top_music_scheduler(bot, storage, config),
             name="top-music-scheduler",
         )
+        music_campaign_task = asyncio.create_task(
+            run_music_campaign_scheduler(bot, storage, config),
+            name="music-campaign-scheduler",
+        )
         await dp.start_polling(bot)
     finally:
         if admin_broadcast_task is not None:
@@ -201,6 +221,17 @@ async def main() -> None:
             except Exception as exc:
                 logger.warning(
                     "admin broadcast resume shutdown failed: %s",
+                    type(exc).__name__,
+                )
+        if music_campaign_task is not None:
+            music_campaign_task.cancel()
+            try:
+                await music_campaign_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "music campaign scheduler shutdown failed: %s",
                     type(exc).__name__,
                 )
         if top_music_task is not None:

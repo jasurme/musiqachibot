@@ -14,6 +14,11 @@ STRINGS = {
     "cmd_start": "Boshlash",
     "cmd_round": "Doira video qilish",
     "cmd_top_music": "Top Music",
+    "cmd_new_music": "Yangi musiqalar",
+    "cmd_rising": "Ommalashayotgan musiqalar",
+    "cmd_discoveries": "Haftalik topilmalar",
+    "cmd_moods": "Kayfiyat musiqalari",
+    "cmd_notifications": "Musiqa xabarnomalari",
     "cmd_lang": "Tilni oʻzgartirish",
     "cmd_privacy": "Maxfiylik maʼlumoti",
     "cmd_delete_my_data": "Saqlangan maʼlumotimni oʻchirish",
@@ -29,6 +34,8 @@ STRINGS = {
         "Qisqa namuna yoki metadata Shazam/AudD xizmatiga; qidiruv va yuklash "
         "soʻrovlari manba xizmatlariga; matn soʻrovi lyrics.ovh xizmatiga yuborilishi "
         "mumkin. Railway va sozlangan proksi tarmoq trafikini qayta ishlaydi. "
+        "Davriy musiqa xabarnomalarini /notifications orqali boshqarishingiz "
+        "mumkin. "
         "ID raqamingizga bogʻliq maʼlumotlarni oʻchirish uchun /delete_my_data dan foydalaning."
     ),
     "data_deleted": "✅ Foydalanuvchi ID raqamingizga bogʻliq maʼlumotlar oʻchirildi.",
@@ -58,6 +65,40 @@ STRINGS = {
     "top_music_unavailable": (
         "⚠️ Top Music hozircha tayyor emas. Birozdan soʻng qayta urinib koʻring."
     ),
+    "new_music_header": "<b>🔥 Yangi musiqalar</b>",
+    "rising_header": "<b>🚀 Ommalashayotganlar</b>",
+    "discoveries_header": "<b>💎 Haftalik topilmalar</b>",
+    "moods_header": "<b>🎭 Kayfiyatingizni tanlang</b>",
+    "mood_night": "🌙 Tungi vibe",
+    "mood_road": "🚗 Yoʻl uchun",
+    "mood_workout": "🏋️ Sport uchun",
+    "mood_calm": "💔 Sokin qoʻshiqlar",
+    "mood_weekend": "🎉 Dam olish kayfiyati",
+    "mood_night_header": "<b>🌙 Tungi vibe</b>",
+    "mood_road_header": "<b>🚗 Yoʻl uchun</b>",
+    "mood_workout_header": "<b>🏋️ Sport uchun</b>",
+    "mood_calm_header": "<b>💔 Sokin qoʻshiqlar</b>",
+    "mood_weekend_header": "<b>🎉 Dam olish kayfiyati</b>",
+    "music_campaign_unavailable": (
+        "⚠️ Bu roʻyxat hozircha tayyor emas. Birozdan soʻng qayta urinib koʻring."
+    ),
+    "btn_back": "⬅️ Orqaga",
+    "btn_open_moods": "🎭 Kayfiyat musiqalari",
+    "btn_notifications_off": "🔕 Oʻchirish",
+    "btn_notification_settings": "⚙️ Sozlash",
+    "notifications_header": (
+        "<b>🔔 Musiqa xabarnomalari</b>\n"
+        "Qaysi yangiliklarni olishni tanlang:"
+    ),
+    "notification_new_music": "Yangi musiqalar",
+    "notification_rising": "Ommalashayotganlar",
+    "notification_discoveries": "Haftalik topilmalar",
+    "btn_notifications_all_on": "🔔 Barchasini yoqish",
+    "btn_notifications_all_off": "🔕 Barchasini oʻchirish",
+    "notifications_saved": "✅ Saqlandi.",
+    "notifications_category_disabled": "🔕 {name} xabarnomalari oʻchirildi.",
+    "notifications_all_enabled": "🔔 Barcha musiqa xabarnomalari yoqildi.",
+    "notifications_all_disabled": "🔕 Barcha musiqa xabarnomalari oʻchirildi.",
     # Feature D — links
     "fetching": "🔎 Maʼlumot olinmoqda...",
     "choose_quality": "🎬 Sifatni tanlang:",

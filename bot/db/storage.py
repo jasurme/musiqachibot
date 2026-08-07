@@ -3,8 +3,10 @@
 The file_id cache is the money-saver: once a song has been sent once, Telegram
 gives us a `file_id` we can re-send instantly, for free, with no re-download.
 """
+import asyncio
 import json
 import logging
+import re
 import secrets
 import time
 from hashlib import sha256
@@ -14,6 +16,24 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 _DIRECT_BROADCAST_HISTORY_SECONDS = 24 * 60 * 60
+
+# Proactive music-notification categories. Top Music remains available through
+# its command/buttons and mood lists through their hub, but neither consumes a
+# proactive broadcast category.
+NOTIFY_NEW_MUSIC = 1
+NOTIFY_RISING_MUSIC = 2
+NOTIFY_DISCOVERIES = 4
+NOTIFY_ALL_MUSIC = (
+    NOTIFY_NEW_MUSIC | NOTIFY_RISING_MUSIC | NOTIFY_DISCOVERIES
+)
+_NOTIFICATION_BITS = {
+    NOTIFY_NEW_MUSIC, NOTIFY_RISING_MUSIC, NOTIFY_DISCOVERIES,
+}
+_MUSIC_KEY = re.compile(r"[a-z][a-z0-9_:-]{0,63}")
+_YOUTUBE_VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{6,32}")
+_MUSIC_CAMPAIGN_STATUSES = {
+    "queued", "sending", "completed", "superseded", "failed",
+}
 
 
 class Storage:
@@ -25,9 +45,26 @@ class Storage:
         self.session_ttl_days = max(1, session_ttl_days)
         self.recognition_ttl_days = max(1, recognition_ttl_days)
         self._db: aiosqlite.Connection | None = None
+        self._music_db: aiosqlite.Connection | None = None
+        # A dedicated connection makes SQLite itself isolate long, explicit
+        # music/outbox transactions from unrelated locale/cache/admin commits.
+        # Shared-cache URI mode preserves normal ``:memory:`` test semantics
+        # across the two connections.
+        if self.path == ":memory:":
+            self._connect_target = (
+                f"file:musiqa_{secrets.token_hex(12)}?mode=memory&cache=shared"
+            )
+            self._connect_uri = True
+        else:
+            self._connect_target = self.path
+            self._connect_uri = False
+        # The second connection still needs one in-process transaction owner.
+        self._music_write_lock = asyncio.Lock()
 
     async def init(self) -> None:
-        self._db = await aiosqlite.connect(self.path)
+        self._db = await aiosqlite.connect(
+            self._connect_target, uri=self._connect_uri
+        )
         await self._db.execute("PRAGMA busy_timeout = 5000")
         if self.path != ":memory:":
             await self._db.execute("PRAGMA journal_mode = WAL")
@@ -36,7 +73,8 @@ class Storage:
             " user_id INTEGER PRIMARY KEY,"
             " locale TEXT,"
             " is_active INTEGER NOT NULL DEFAULT 1,"
-            " deactivated_at TEXT)"
+            " deactivated_at TEXT,"
+            f" notification_mask INTEGER NOT NULL DEFAULT {NOTIFY_ALL_MUSIC})"
         )
         # Safe forward migration for the original two-column users table.
         async with self._db.execute("PRAGMA table_info(users)") as cur:
@@ -48,6 +86,11 @@ class Storage:
         if "deactivated_at" not in user_columns:
             await self._db.execute(
                 "ALTER TABLE users ADD COLUMN deactivated_at TEXT"
+            )
+        if "notification_mask" not in user_columns:
+            await self._db.execute(
+                "ALTER TABLE users ADD COLUMN notification_mask INTEGER "
+                f"NOT NULL DEFAULT {NOTIFY_ALL_MUSIC}"
             )
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_users_broadcast "
@@ -159,6 +202,95 @@ class Storage:
         await self._db.execute(
             "INSERT OR IGNORE INTO top_music_state (id) VALUES (1)"
         )
+        # Generalized atomic music snapshots. Network/provider work writes a
+        # complete candidate in one transaction; handlers only read the last
+        # complete JSON snapshot and therefore stay provider-free and fast.
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS music_collection_state ("
+            " collection_key TEXT PRIMARY KEY,"
+            " expected_count INTEGER NOT NULL CHECK (expected_count > 0),"
+            " generation INTEGER NOT NULL DEFAULT 0,"
+            " items_json TEXT NOT NULL DEFAULT '[]',"
+            " resolutions_json TEXT NOT NULL DEFAULT '{}',"
+            " provider_state_json TEXT NOT NULL DEFAULT '{}',"
+            " fingerprint TEXT,"
+            " refreshed_at INTEGER,"
+            " next_refresh_at INTEGER NOT NULL DEFAULT 0,"
+            " failure_count INTEGER NOT NULL DEFAULT 0,"
+            " refresh_lease_token TEXT,"
+            " refresh_lease_until INTEGER)"
+        )
+        # Whole ranked source snapshots are retained for rising/novelty
+        # comparisons. JSON keeps one observation atomic and the bounded index
+        # makes weekly pruning cheap.
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS music_chart_snapshots ("
+            " chart_key TEXT NOT NULL,"
+            " captured_at INTEGER NOT NULL,"
+            " items_json TEXT NOT NULL,"
+            " fingerprint TEXT NOT NULL,"
+            " PRIMARY KEY (chart_key, captured_at))"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_music_chart_snapshots_lookup "
+            "ON music_chart_snapshots(chart_key, captured_at DESC)"
+        )
+        # Each queued row freezes its text and exact track buttons. A later
+        # collection refresh cannot mutate a partially delivered campaign.
+        # week_key/slot_no form the durable global weekly quota reservation.
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS music_campaign_outbox ("
+            " campaign_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " dedupe_key TEXT NOT NULL UNIQUE,"
+            " collection_key TEXT NOT NULL,"
+            " collection_generation INTEGER NOT NULL,"
+            " campaign_kind TEXT NOT NULL,"
+            " payload_json TEXT NOT NULL,"
+            " notification_mask INTEGER NOT NULL,"
+            " eligible_at INTEGER NOT NULL,"
+            " expires_at INTEGER,"
+            " priority INTEGER NOT NULL DEFAULT 0,"
+            " status TEXT NOT NULL DEFAULT 'queued' "
+            "CHECK (status IN "
+            "('queued','sending','completed','superseded','failed')),"
+            " week_key TEXT,"
+            " slot_no INTEGER,"
+            " audience_upper_user_id INTEGER NOT NULL DEFAULT 0,"
+            " broadcast_cursor INTEGER NOT NULL DEFAULT 0,"
+            " broadcast_sent INTEGER NOT NULL DEFAULT 0,"
+            " broadcast_inactive INTEGER NOT NULL DEFAULT 0,"
+            " broadcast_failed INTEGER NOT NULL DEFAULT 0,"
+            " runner_token TEXT,"
+            " runner_lease_until INTEGER,"
+            " created_at INTEGER NOT NULL,"
+            " started_at INTEGER,"
+            " completed_at INTEGER)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_music_campaign_outbox_ready "
+            "ON music_campaign_outbox(status, eligible_at, priority DESC, "
+            "campaign_id)"
+        )
+        await self._db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_music_campaign_week_slot ON music_campaign_outbox"
+            "(week_key, slot_no) WHERE week_key IS NOT NULL "
+            "AND slot_no IS NOT NULL"
+        )
+        # Preserve an existing Top Music snapshot for the generic read path.
+        # Its old pending fan-out is deliberately not copied: Top Music no
+        # longer creates proactive campaigns in the generalized subsystem.
+        await self._db.execute(
+            "INSERT OR IGNORE INTO music_collection_state ("
+            "collection_key, expected_count, generation, items_json, "
+            "resolutions_json, provider_state_json, fingerprint, "
+            "refreshed_at, next_refresh_at, failure_count, "
+            "refresh_lease_token, refresh_lease_until) "
+            "SELECT 'top_music', 10, generation, items_json, "
+            "resolutions_json, '{}', fingerprint, refreshed_at, "
+            "next_refresh_at, failure_count, refresh_lease_token, "
+            "refresh_lease_until FROM top_music_state WHERE id = 1"
+        )
         # Earlier releases only recorded users who selected a language. Recover
         # every positive private owner ID still present in recognition/session
         # rows so the first deployment does not start with an empty audience.
@@ -185,10 +317,18 @@ class Storage:
                 ((user_id,) for user_id in sorted(recovered_user_ids)),
             )
         await self._db.commit()
+        self._music_db = await aiosqlite.connect(
+            self._connect_target, uri=self._connect_uri
+        )
+        await self._music_db.execute("PRAGMA busy_timeout = 5000")
 
     async def close(self) -> None:
+        if self._music_db is not None:
+            await self._music_db.close()
+            self._music_db = None
         if self._db is not None:
             await self._db.close()
+            self._db = None
 
     # ── locale ──────────────────────────────────────────
     async def get_locale(self, user_id: int) -> str | None:
@@ -238,6 +378,7 @@ class Storage:
         self, *, after_user_id: int = 0, limit: int = 500,
         exclude_user_id: int | None = None,
         through_user_id: int | None = None,
+        notification_mask: int | None = None,
     ) -> list[int]:
         """Return one keyset-paged broadcast batch in stable user-ID order."""
         limit = max(1, min(int(limit), 1000))
@@ -249,6 +390,12 @@ class Storage:
         if through_user_id is not None:
             clauses.append("user_id <= ?")
             params.append(int(through_user_id))
+        if notification_mask is not None:
+            mask = self._validate_notification_mask(
+                notification_mask, allow_zero=True
+            )
+            clauses.append("(notification_mask & ?) != 0")
+            params.append(mask)
         query = (
             "SELECT user_id FROM users WHERE " + " AND ".join(clauses)
             + " ORDER BY user_id LIMIT ?"
@@ -260,20 +407,94 @@ class Storage:
 
     async def get_active_user_upper_bound(
         self, *, exclude_user_id: int | None = None,
+        notification_mask: int | None = None,
     ) -> int:
         """Freeze the upper edge of a new keyset-paged broadcast audience."""
-        if exclude_user_id is None:
-            query = "SELECT COALESCE(MAX(user_id), 0) FROM users WHERE is_active = 1"
-            params = ()
-        else:
-            query = (
-                "SELECT COALESCE(MAX(user_id), 0) FROM users "
-                "WHERE is_active = 1 AND user_id != ?"
+        clauses = ["is_active = 1"]
+        params: list[int] = []
+        if exclude_user_id is not None:
+            clauses.append("user_id != ?")
+            params.append(int(exclude_user_id))
+        if notification_mask is not None:
+            mask = self._validate_notification_mask(
+                notification_mask, allow_zero=True
             )
-            params = (int(exclude_user_id),)
+            clauses.append("(notification_mask & ?) != 0")
+            params.append(mask)
+        query = (
+            "SELECT COALESCE(MAX(user_id), 0) FROM users WHERE "
+            + " AND ".join(clauses)
+        )
         async with self._db.execute(query, params) as cur:
             row = await cur.fetchone()
         return int(row[0]) if row else 0
+
+    @staticmethod
+    def _validate_notification_mask(
+        mask: int, *, allow_zero: bool = True,
+    ) -> int:
+        if isinstance(mask, bool):
+            raise ValueError("notification mask must be an integer")
+        try:
+            value = int(mask)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("notification mask must be an integer") from exc
+        minimum = 0 if allow_zero else 1
+        if value < minimum or value & ~NOTIFY_ALL_MUSIC:
+            raise ValueError("notification mask contains unsupported bits")
+        return value
+
+    async def get_notification_mask(self, user_id: int) -> int:
+        """Return a user's proactive music categories (all for a new user)."""
+        async with self._db.execute(
+            "SELECT notification_mask FROM users WHERE user_id = ?",
+            (int(user_id),),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return NOTIFY_ALL_MUSIC
+        try:
+            return self._validate_notification_mask(row[0], allow_zero=True)
+        except ValueError:
+            logger.warning(
+                "Resetting invalid notification mask user_id=%s", user_id
+            )
+            await self.set_notification_mask(user_id, NOTIFY_ALL_MUSIC)
+            return NOTIFY_ALL_MUSIC
+
+    async def set_notification_mask(self, user_id: int, mask: int) -> None:
+        """Persist a complete proactive-music preference mask."""
+        value = self._validate_notification_mask(mask, allow_zero=True)
+        async with self._music_write_lock:
+            await self._music_db.execute(
+                "INSERT INTO users (user_id, notification_mask) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET "
+                "notification_mask = excluded.notification_mask",
+                (int(user_id), value),
+            )
+            await self._music_db.commit()
+
+    async def toggle_notification_mask(self, user_id: int, bit: int) -> int:
+        """Atomically toggle one supported category and return the new mask."""
+        if isinstance(bit, bool) or int(bit) not in _NOTIFICATION_BITS:
+            raise ValueError("notification bit is not a supported category")
+        value = int(bit)
+        async with self._music_write_lock:
+            async with self._music_db.execute(
+                "INSERT INTO users (user_id, notification_mask) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET notification_mask = CASE "
+                    "WHEN (notification_mask & ?) != 0 "
+                    "THEN (notification_mask & ?) "
+                "ELSE (notification_mask | ?) END "
+                "RETURNING notification_mask",
+                (
+                    int(user_id), NOTIFY_ALL_MUSIC & ~value, value,
+                    NOTIFY_ALL_MUSIC & ~value, value,
+                ),
+            ) as cur:
+                row = await cur.fetchone()
+            await self._music_db.commit()
+        return self._validate_notification_mask(row[0], allow_zero=True)
 
     async def mark_users_inactive(self, user_ids: list[int]) -> None:
         """Stop future broadcasts to blocked/deactivated Telegram accounts."""
@@ -839,6 +1060,966 @@ class Storage:
             (int(generation),),
         )
         await self._db.commit()
+        return cursor.rowcount == 1
+
+    # ── generalized editorial music snapshots ─────────────────
+    @staticmethod
+    def _validate_music_key(key: str, *, label: str = "music key") -> str:
+        value = str(key or "").strip()
+        if _MUSIC_KEY.fullmatch(value) is None:
+            raise ValueError(f"invalid {label}")
+        return value
+
+    @staticmethod
+    def _json_object(value: dict | None, *, label: str) -> dict:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError(f"{label} must be a dictionary")
+        try:
+            return json.loads(json.dumps(
+                value, ensure_ascii=False, separators=(",", ":")
+            ))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} must be JSON serializable") from exc
+
+    @classmethod
+    def _normalize_music_collection_items(
+        cls, items: list[dict], expected_count: int,
+    ) -> list[dict]:
+        """Validate one complete downloadable collection without dropping metadata."""
+        count = int(expected_count)
+        if count <= 0 or count > 100:
+            raise ValueError("music collection expected_count is out of range")
+        if not isinstance(items, list) or len(items) != count:
+            raise ValueError(
+                f"music collection must contain exactly {count} items"
+            )
+        try:
+            copied = json.loads(json.dumps(
+                items, ensure_ascii=False, separators=(",", ":")
+            ))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("music collection items must be JSON serializable") from exc
+
+        normalized: list[dict] = []
+        source_ids: set[str] = set()
+        video_ids: set[str] = set()
+        for item in copied:
+            if not isinstance(item, dict):
+                raise ValueError("music collection items must be dictionaries")
+            for field in ("source_id", "artist", "name", "video_id", "title"):
+                value = item.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"music collection item has invalid {field}")
+                item[field] = value.strip()
+            if item["source_id"] in source_ids:
+                raise ValueError("music collection source IDs must be unique")
+            if _YOUTUBE_VIDEO_ID.fullmatch(item["video_id"]) is None:
+                raise ValueError("music collection item has invalid video_id")
+            if item["video_id"] in video_ids:
+                raise ValueError("music collection video IDs must be unique")
+            source_ids.add(item["source_id"])
+            video_ids.add(item["video_id"])
+
+            duration = item.get("duration")
+            if duration is not None:
+                if isinstance(duration, bool):
+                    raise ValueError("music collection duration must be an integer")
+                try:
+                    duration = int(duration)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "music collection duration must be an integer"
+                    ) from exc
+                if duration < 0:
+                    raise ValueError("music collection duration cannot be negative")
+            item["duration"] = duration
+            uploader = item.get("uploader") or ""
+            if not isinstance(uploader, str):
+                raise ValueError("music collection uploader must be text")
+            item["uploader"] = uploader.strip()
+            for field in ("apple_url", "source_url", "release_date", "storefront"):
+                if field in item and item[field] is not None:
+                    if not isinstance(item[field], str):
+                        raise ValueError(
+                            f"music collection {field} must be text"
+                        )
+                    item[field] = item[field].strip()
+            normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _music_collection_fingerprint(items: list[dict]) -> str:
+        # Include the exact durable callback target as well as ordered source
+        # identity. A repaired YouTube mapping must activate a new snapshot.
+        identity = [
+            [item["source_id"], item["video_id"], item["title"]]
+            for item in items
+        ]
+        raw = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+        return sha256(raw.encode("utf-8")).hexdigest()
+
+    async def ensure_music_collection(
+        self, key: str, expected_count: int,
+    ) -> None:
+        """Create an empty configured collection, rejecting count drift."""
+        collection_key = self._validate_music_key(key, label="collection key")
+        count = int(expected_count)
+        if count <= 0 or count > 100:
+            raise ValueError("music collection expected_count is out of range")
+        await self._music_db.execute(
+            "INSERT OR IGNORE INTO music_collection_state "
+            "(collection_key, expected_count) VALUES (?, ?)",
+            (collection_key, count),
+        )
+        async with self._music_db.execute(
+            "SELECT expected_count FROM music_collection_state "
+            "WHERE collection_key = ?",
+            (collection_key,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None or int(row[0]) != count:
+            await self._music_db.rollback()
+            raise ValueError("music collection expected_count cannot change")
+        await self._music_db.commit()
+
+    async def get_music_collection_state(self, key: str) -> dict:
+        collection_key = self._validate_music_key(key, label="collection key")
+        async with self._music_db.execute(
+            "SELECT collection_key, expected_count, generation, items_json, "
+            "resolutions_json, provider_state_json, fingerprint, refreshed_at, "
+            "next_refresh_at, failure_count, refresh_lease_token, "
+            "refresh_lease_until FROM music_collection_state "
+            "WHERE collection_key = ?",
+            (collection_key,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return {
+                "key": collection_key, "expected_count": 0,
+                "generation": 0, "items": [], "resolutions": {},
+                "provider_state": {}, "fingerprint": None,
+                "refreshed_at": None, "next_refresh_at": 0,
+                "failure_count": 0, "refresh_lease_token": None,
+                "refresh_lease_until": None,
+            }
+        expected_count = int(row[1])
+        try:
+            raw_items = json.loads(row[3])
+            items = (
+                self._normalize_music_collection_items(
+                    raw_items, expected_count
+                )
+                if raw_items else []
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.error(
+                "Discarding invalid music collection key=%s", collection_key
+            )
+            items = []
+
+        decoded_objects: list[dict] = []
+        for raw, label in (
+            (row[4], "resolutions"), (row[5], "provider state"),
+        ):
+            try:
+                value = json.loads(raw)
+                if not isinstance(value, dict):
+                    raise ValueError
+            except (TypeError, ValueError, json.JSONDecodeError):
+                logger.error(
+                    "Discarding invalid music %s key=%s", label, collection_key
+                )
+                value = {}
+            decoded_objects.append(value)
+        return {
+            "key": row[0], "expected_count": expected_count,
+            "generation": int(row[2]), "items": items,
+            "resolutions": decoded_objects[0],
+            "provider_state": decoded_objects[1], "fingerprint": row[6],
+            "refreshed_at": int(row[7]) if row[7] is not None else None,
+            "next_refresh_at": int(row[8]), "failure_count": int(row[9]),
+            "refresh_lease_token": row[10],
+            "refresh_lease_until": (
+                int(row[11]) if row[11] is not None else None
+            ),
+        }
+
+    async def claim_music_collection_refresh(
+        self, key: str, now: int, *, lease_seconds: int = 900,
+        force: bool = False,
+    ) -> str | None:
+        collection_key = self._validate_music_key(key, label="collection key")
+        token = secrets.token_urlsafe(18)
+        params: list[object] = [
+            token, int(now) + max(30, int(lease_seconds)), collection_key,
+        ]
+        due_clause = "1 = 1" if force else "next_refresh_at <= ?"
+        if not force:
+            params.append(int(now))
+        params.append(int(now))
+        cursor = await self._music_db.execute(
+            "UPDATE music_collection_state SET refresh_lease_token = ?, "
+            "refresh_lease_until = ? WHERE collection_key = ? AND "
+            f"{due_clause} AND (refresh_lease_until IS NULL "
+            "OR refresh_lease_until <= ?)",
+            params,
+        )
+        await self._music_db.commit()
+        return token if cursor.rowcount == 1 else None
+
+    async def release_music_collection_refresh(
+        self, key: str, claim_token: str,
+    ) -> None:
+        collection_key = self._validate_music_key(key, label="collection key")
+        await self._music_db.execute(
+            "UPDATE music_collection_state SET refresh_lease_token = NULL, "
+            "refresh_lease_until = NULL WHERE collection_key = ? "
+            "AND refresh_lease_token = ?",
+            (collection_key, claim_token),
+        )
+        await self._music_db.commit()
+
+    async def defer_music_collection_refresh(
+        self, key: str, claim_token: str, *, next_refresh_at: int,
+    ) -> bool:
+        """Finish a valid no-content refresh without counting it as failure."""
+        collection_key = self._validate_music_key(key, label="collection key")
+        cursor = await self._music_db.execute(
+            "UPDATE music_collection_state SET next_refresh_at = ?, "
+            "failure_count = 0, refresh_lease_token = NULL, "
+            "refresh_lease_until = NULL WHERE collection_key = ? "
+            "AND refresh_lease_token = ?",
+            (max(0, int(next_refresh_at)), collection_key, claim_token),
+        )
+        await self._music_db.commit()
+        return cursor.rowcount == 1
+
+    @classmethod
+    def _validate_campaign_spec(cls, campaign: dict | None) -> dict | None:
+        if campaign is None:
+            return None
+        if not isinstance(campaign, dict):
+            raise ValueError("music campaign specification must be a dictionary")
+        dedupe_key = str(campaign.get("dedupe_key") or "").strip()
+        if not dedupe_key or len(dedupe_key) > 200:
+            raise ValueError("music campaign has an invalid dedupe_key")
+        kind = cls._validate_music_key(
+            campaign.get("kind"), label="campaign kind"
+        )
+        header_key = str(campaign.get("header_key") or "").strip()
+        if _MUSIC_KEY.fullmatch(header_key) is None:
+            raise ValueError("music campaign has an invalid header_key")
+        notification_mask = cls._validate_notification_mask(
+            campaign.get("notification_mask"), allow_zero=False
+        )
+        eligible_at = int(campaign.get("eligible_at"))
+        raw_expires = campaign.get("expires_at")
+        expires_at = int(raw_expires) if raw_expires is not None else None
+        if expires_at is not None and expires_at <= eligible_at:
+            raise ValueError("music campaign must expire after it becomes eligible")
+        return {
+            "dedupe_key": dedupe_key,
+            "kind": kind,
+            "header_key": header_key,
+            "notification_mask": notification_mask,
+            "eligible_at": eligible_at,
+            "expires_at": expires_at,
+            "priority": int(campaign.get("priority") or 0),
+        }
+
+    async def _enqueue_music_campaign_locked(
+        self,
+        *,
+        collection_key: str,
+        generation: int,
+        items: list[dict],
+        campaign: dict,
+        created_at: int,
+    ) -> tuple[int, bool]:
+        """Insert one immutable outbox row inside the caller's transaction."""
+        spec = self._validate_campaign_spec(campaign)
+        if spec is None:  # pragma: no cover - guarded by callers
+            raise ValueError("music campaign specification is required")
+        payload = json.dumps(
+            {"header_key": spec["header_key"], "items": items},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        async with self._music_db.execute(
+            "SELECT campaign_id FROM music_campaign_outbox "
+            "WHERE dedupe_key = ?",
+            (spec["dedupe_key"],),
+        ) as cur:
+            existing = await cur.fetchone()
+        if existing is not None:
+            return int(existing[0]), False
+        # Only an unsent older candidate of the same category is superseded.
+        # A partially sent campaign always resumes with its frozen payload.
+        await self._music_db.execute(
+            "UPDATE music_campaign_outbox SET status = 'superseded', "
+            "completed_at = ? WHERE collection_key = ? AND campaign_kind = ? "
+            "AND status = 'queued' AND dedupe_key != ?",
+            (
+                int(created_at), collection_key, spec["kind"],
+                spec["dedupe_key"],
+            ),
+        )
+        cursor = await self._music_db.execute(
+            "INSERT OR IGNORE INTO music_campaign_outbox ("
+            "dedupe_key, collection_key, collection_generation, "
+            "campaign_kind, payload_json, notification_mask, eligible_at, "
+            "expires_at, priority, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+            (
+                spec["dedupe_key"], collection_key, int(generation),
+                spec["kind"], payload, spec["notification_mask"],
+                spec["eligible_at"], spec["expires_at"], spec["priority"],
+                int(created_at),
+            ),
+        )
+        created = cursor.rowcount == 1
+        async with self._music_db.execute(
+            "SELECT campaign_id FROM music_campaign_outbox "
+            "WHERE dedupe_key = ?",
+            (spec["dedupe_key"],),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise RuntimeError("music campaign outbox insert disappeared")
+        return int(row[0]), created
+
+    async def _publish_music_collection_locked(
+        self,
+        key: str,
+        items: list[dict],
+        *,
+        now: int,
+        claim_token: str,
+        refresh_seconds: int,
+        resolutions: dict | None,
+        provider_state: dict | None,
+        campaign: dict | None,
+    ) -> dict:
+        """Publish inside an already-open transaction."""
+        collection_key = self._validate_music_key(key, label="collection key")
+        async with self._music_db.execute(
+            "SELECT expected_count, generation, resolutions_json, "
+            "provider_state_json, fingerprint, refresh_lease_token "
+            "FROM music_collection_state WHERE collection_key = ?",
+            (collection_key,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise ValueError("music collection has not been configured")
+        if row[5] != claim_token:
+            raise RuntimeError("music collection refresh lease was lost")
+
+        expected_count = int(row[0])
+        normalized = self._normalize_music_collection_items(
+            items, expected_count
+        )
+        fingerprint = self._music_collection_fingerprint(normalized)
+        changed = row[4] != fingerprint
+        generation = int(row[1]) + (1 if changed else 0)
+
+        if resolutions is None:
+            try:
+                normalized_resolutions = json.loads(row[2])
+                if not isinstance(normalized_resolutions, dict):
+                    raise ValueError
+            except (TypeError, ValueError, json.JSONDecodeError):
+                normalized_resolutions = {}
+        else:
+            normalized_resolutions = self._json_object(
+                resolutions, label="music resolutions"
+            )
+        if provider_state is None:
+            try:
+                normalized_provider_state = json.loads(row[3])
+                if not isinstance(normalized_provider_state, dict):
+                    raise ValueError
+            except (TypeError, ValueError, json.JSONDecodeError):
+                normalized_provider_state = {}
+        else:
+            normalized_provider_state = self._json_object(
+                provider_state, label="music provider state"
+            )
+        campaign_spec = self._validate_campaign_spec(campaign)
+
+        cursor = await self._music_db.execute(
+            "UPDATE music_collection_state SET generation = ?, items_json = ?, "
+            "resolutions_json = ?, provider_state_json = ?, fingerprint = ?, "
+            "refreshed_at = ?, next_refresh_at = ?, failure_count = 0, "
+            "refresh_lease_token = NULL, refresh_lease_until = NULL "
+            "WHERE collection_key = ? AND refresh_lease_token = ?",
+            (
+                generation,
+                json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(
+                    normalized_resolutions, ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    normalized_provider_state, ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                fingerprint, int(now),
+                int(now) + max(60, int(refresh_seconds)), collection_key,
+                claim_token,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "music collection refresh lease was lost before publication"
+            )
+
+        campaign_id = None
+        campaign_created = False
+        if changed and campaign_spec is not None:
+            campaign_id, campaign_created = await self._enqueue_music_campaign_locked(
+                collection_key=collection_key,
+                generation=generation,
+                items=normalized,
+                campaign=campaign_spec,
+                created_at=int(now),
+            )
+        return {
+            "changed": changed,
+            "generation": generation,
+            "campaign_id": campaign_id,
+            "campaign_created": campaign_created,
+        }
+
+    async def publish_music_collection(
+        self,
+        key: str,
+        items: list[dict],
+        *,
+        now: int,
+        claim_token: str,
+        refresh_seconds: int,
+        resolutions: dict | None = None,
+        provider_state: dict | None = None,
+        campaign: dict | None = None,
+    ) -> dict:
+        """Atomically replace one last-good snapshot and optional campaign."""
+        async with self._music_write_lock:
+            await self._music_db.execute("BEGIN IMMEDIATE")
+            try:
+                result = await self._publish_music_collection_locked(
+                    key,
+                    items,
+                    now=now,
+                    claim_token=claim_token,
+                    refresh_seconds=refresh_seconds,
+                    resolutions=resolutions,
+                    provider_state=provider_state,
+                    campaign=campaign,
+                )
+                await self._music_db.commit()
+            except BaseException:
+                await self._music_db.rollback()
+                raise
+        return result
+
+    async def publish_music_collection_batch(
+        self, publications: list[dict],
+    ) -> list[dict]:
+        """Atomically publish a validated group (the five weekly moods)."""
+        if not isinstance(publications, list) or not publications:
+            raise ValueError("music publication batch cannot be empty")
+        keys = [
+            self._validate_music_key(item.get("key"), label="collection key")
+            if isinstance(item, dict) else ""
+            for item in publications
+        ]
+        if not all(keys) or len(set(keys)) != len(keys):
+            raise ValueError("music publication batch keys must be unique")
+        results: list[dict] = []
+        async with self._music_write_lock:
+            await self._music_db.execute("BEGIN IMMEDIATE")
+            try:
+                for publication in publications:
+                    results.append(await self._publish_music_collection_locked(
+                        publication["key"],
+                        publication["items"],
+                        now=int(publication["now"]),
+                        claim_token=publication["claim_token"],
+                        refresh_seconds=int(publication["refresh_seconds"]),
+                        resolutions=publication.get("resolutions"),
+                        provider_state=publication.get("provider_state"),
+                        campaign=publication.get("campaign"),
+                    ))
+                await self._music_db.commit()
+            except BaseException:
+                await self._music_db.rollback()
+                raise
+        return results
+
+    async def fail_music_collection_refresh(
+        self,
+        key: str,
+        claim_token: str,
+        *,
+        now: int,
+        base_seconds: int = 1800,
+        max_seconds: int = 21600,
+    ) -> int:
+        """Keep the last-good snapshot and persist bounded exponential backoff."""
+        collection_key = self._validate_music_key(key, label="collection key")
+        async with self._music_db.execute(
+            "SELECT failure_count, next_refresh_at FROM music_collection_state "
+            "WHERE collection_key = ?",
+            (collection_key,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise ValueError("music collection has not been configured")
+        failure_count = max(0, int(row[0])) + 1
+        base = max(1, int(base_seconds))
+        cap = max(60, base, int(max_seconds))
+        delay = min(cap, base * (2 ** min(failure_count - 1, 8)))
+        retry_at = int(now) + delay
+        cursor = await self._music_db.execute(
+            "UPDATE music_collection_state SET failure_count = ?, "
+            "next_refresh_at = ?, refresh_lease_token = NULL, "
+            "refresh_lease_until = NULL WHERE collection_key = ? "
+            "AND refresh_lease_token = ?",
+            (failure_count, retry_at, collection_key, claim_token),
+        )
+        await self._music_db.commit()
+        return retry_at if cursor.rowcount == 1 else int(row[1])
+
+    @classmethod
+    def _normalize_chart_snapshot_items(cls, items: list[dict]) -> list[dict]:
+        if not isinstance(items, list) or not 1 <= len(items) <= 200:
+            raise ValueError("music chart snapshot must contain 1 to 200 items")
+        try:
+            copied = json.loads(json.dumps(
+                items, ensure_ascii=False, separators=(",", ":")
+            ))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("music chart snapshot must be JSON serializable") from exc
+        source_ids: set[str] = set()
+        for index, item in enumerate(copied, start=1):
+            if not isinstance(item, dict):
+                raise ValueError("music chart entries must be dictionaries")
+            source_id = item.get("source_id")
+            if not isinstance(source_id, str) or not source_id.strip():
+                raise ValueError("music chart entry has invalid source_id")
+            item["source_id"] = source_id.strip()
+            if item["source_id"] in source_ids:
+                raise ValueError("music chart source IDs must be unique")
+            source_ids.add(item["source_id"])
+            if "rank" in item:
+                if isinstance(item["rank"], bool):
+                    raise ValueError("music chart rank must be an integer")
+                try:
+                    item["rank"] = int(item["rank"])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("music chart rank must be an integer") from exc
+                if item["rank"] <= 0:
+                    raise ValueError("music chart rank must be positive")
+            else:
+                item["rank"] = index
+        return copied
+
+    async def record_music_chart_snapshot(
+        self,
+        chart_key: str,
+        items: list[dict],
+        *,
+        captured_at: int,
+        keep: int = 32,
+    ) -> bool:
+        """Persist one full ranked observation and prune older history."""
+        key = self._validate_music_key(chart_key, label="chart key")
+        normalized = self._normalize_chart_snapshot_items(items)
+        identity = [item["source_id"] for item in normalized]
+        fingerprint = sha256("\n".join(identity).encode("utf-8")).hexdigest()
+        retained = max(2, min(int(keep), 365))
+        async with self._music_write_lock:
+            await self._music_db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self._music_db.execute(
+                    "INSERT OR IGNORE INTO music_chart_snapshots "
+                    "(chart_key, captured_at, items_json, fingerprint) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        key, int(captured_at),
+                        json.dumps(
+                            normalized, ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        fingerprint,
+                    ),
+                )
+                await self._music_db.execute(
+                    "DELETE FROM music_chart_snapshots WHERE chart_key = ? "
+                    "AND captured_at NOT IN (SELECT captured_at FROM "
+                    "music_chart_snapshots WHERE chart_key = ? "
+                    "ORDER BY captured_at DESC LIMIT ?)",
+                    (key, key, retained),
+                )
+                await self._music_db.commit()
+            except BaseException:
+                await self._music_db.rollback()
+                raise
+        return cursor.rowcount == 1
+
+    @classmethod
+    def _decode_chart_snapshot(cls, row) -> dict | None:
+        if row is None:
+            return None
+        try:
+            items = cls._normalize_chart_snapshot_items(json.loads(row[2]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.error(
+                "Discarding invalid chart snapshot chart=%s captured_at=%s",
+                row[0], row[1],
+            )
+            return None
+        return {
+            "chart_key": row[0], "captured_at": int(row[1]),
+            "items": items, "fingerprint": row[3],
+        }
+
+    async def get_music_chart_snapshot_before(
+        self, chart_key: str, before: int,
+    ) -> dict | None:
+        key = self._validate_music_key(chart_key, label="chart key")
+        async with self._music_db.execute(
+            "SELECT chart_key, captured_at, items_json, fingerprint "
+            "FROM music_chart_snapshots WHERE chart_key = ? "
+            "AND captured_at < ? ORDER BY captured_at DESC LIMIT 1",
+            (key, int(before)),
+        ) as cur:
+            row = await cur.fetchone()
+        return self._decode_chart_snapshot(row)
+
+    async def get_latest_music_chart_snapshot(
+        self, chart_key: str,
+    ) -> dict | None:
+        key = self._validate_music_key(chart_key, label="chart key")
+        async with self._music_db.execute(
+            "SELECT chart_key, captured_at, items_json, fingerprint "
+            "FROM music_chart_snapshots WHERE chart_key = ? "
+            "ORDER BY captured_at DESC LIMIT 1",
+            (key,),
+        ) as cur:
+            row = await cur.fetchone()
+        return self._decode_chart_snapshot(row)
+
+    # ── durable, globally quota-limited music campaign outbox ──────
+    @staticmethod
+    def _decode_music_campaign_row(row) -> dict | None:
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row[5])
+        except (TypeError, json.JSONDecodeError):
+            logger.error("Discarding invalid campaign payload id=%s", row[0])
+            return None
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("header_key"), str)
+            or not isinstance(payload.get("items"), list)
+        ):
+            logger.error("Discarding malformed campaign payload id=%s", row[0])
+            return None
+        status = str(row[10])
+        if status not in _MUSIC_CAMPAIGN_STATUSES:
+            return None
+        return {
+            "campaign_id": int(row[0]), "dedupe_key": row[1],
+            "collection_key": row[2], "collection_generation": int(row[3]),
+            "kind": row[4], "payload": payload,
+            "notification_mask": int(row[6]), "eligible_at": int(row[7]),
+            "expires_at": int(row[8]) if row[8] is not None else None,
+            "priority": int(row[9]), "status": status, "week_key": row[11],
+            "slot_no": int(row[12]) if row[12] is not None else None,
+            "audience_upper_user_id": int(row[13]),
+            "broadcast_cursor": int(row[14]), "broadcast_sent": int(row[15]),
+            "broadcast_inactive": int(row[16]),
+            "broadcast_failed": int(row[17]), "runner_token": row[18],
+            "runner_lease_until": (
+                int(row[19]) if row[19] is not None else None
+            ),
+            "created_at": int(row[20]),
+            "started_at": int(row[21]) if row[21] is not None else None,
+            "completed_at": int(row[22]) if row[22] is not None else None,
+        }
+
+    @staticmethod
+    def _music_campaign_select() -> str:
+        return (
+            "campaign_id, dedupe_key, collection_key, collection_generation, "
+            "campaign_kind, payload_json, notification_mask, eligible_at, "
+            "expires_at, priority, status, week_key, slot_no, "
+            "audience_upper_user_id, broadcast_cursor, broadcast_sent, "
+            "broadcast_inactive, broadcast_failed, runner_token, "
+            "runner_lease_until, created_at, started_at, completed_at"
+        )
+
+    async def enqueue_music_campaign(
+        self,
+        *,
+        dedupe_key: str,
+        collection_key: str,
+        generation: int,
+        kind: str,
+        header_key: str,
+        items: list[dict],
+        notification_mask: int,
+        eligible_at: int,
+        expires_at: int | None,
+        priority: int = 0,
+        now: int | None = None,
+    ) -> int:
+        """Idempotently enqueue an already-published frozen collection."""
+        key = self._validate_music_key(collection_key, label="collection key")
+        state = await self.get_music_collection_state(key)
+        if state["expected_count"] <= 0:
+            raise ValueError("music collection has not been configured")
+        normalized = self._normalize_music_collection_items(
+            items, state["expected_count"]
+        )
+        campaign = {
+            "dedupe_key": dedupe_key,
+            "kind": kind,
+            "header_key": header_key,
+            "notification_mask": notification_mask,
+            "eligible_at": eligible_at,
+            "expires_at": expires_at,
+            "priority": priority,
+        }
+        async with self._music_write_lock:
+            await self._music_db.execute("BEGIN IMMEDIATE")
+            try:
+                campaign_id, _created = await self._enqueue_music_campaign_locked(
+                    collection_key=key,
+                    generation=int(generation),
+                    items=normalized,
+                    campaign=campaign,
+                    created_at=int(time.time()) if now is None else int(now),
+                )
+                await self._music_db.commit()
+            except BaseException:
+                await self._music_db.rollback()
+                raise
+        return campaign_id
+
+    async def get_music_campaign(self, campaign_id: int) -> dict | None:
+        async with self._music_db.execute(
+            "SELECT " + self._music_campaign_select()
+            + " FROM music_campaign_outbox WHERE campaign_id = ?",
+            (int(campaign_id),),
+        ) as cur:
+            row = await cur.fetchone()
+        return self._decode_music_campaign_row(row)
+
+    async def claim_next_music_campaign(
+        self,
+        *,
+        now: int,
+        week_key: str,
+        max_per_week: int = 3,
+        lease_seconds: int = 120,
+    ) -> dict | None:
+        """Resume one delivery or atomically reserve a due weekly slot."""
+        timestamp = int(now)
+        week = str(week_key or "").strip()
+        if not week or len(week) > 64:
+            raise ValueError("music campaign week_key is invalid")
+        weekly_limit = max(1, min(int(max_per_week), 7))
+        lease_until = timestamp + max(30, int(lease_seconds))
+        token = secrets.token_urlsafe(18)
+
+        async with self._music_write_lock:
+            await self._music_db.execute("BEGIN IMMEDIATE")
+            try:
+                # Expired candidates were never delivered and consume no slot.
+                await self._music_db.execute(
+                    "UPDATE music_campaign_outbox SET status = 'superseded', "
+                    "completed_at = ? WHERE status = 'queued' "
+                    "AND expires_at IS NOT NULL AND expires_at <= ?",
+                    (timestamp, timestamp),
+                )
+
+                # There may be only one scheduled campaign runner. If its
+                # short lease is still active, another process must stand down;
+                # otherwise this caller atomically takes over its exact cursor.
+                async with self._music_db.execute(
+                    "SELECT campaign_id, runner_lease_until "
+                    "FROM music_campaign_outbox WHERE status = 'sending' "
+                    "ORDER BY started_at, campaign_id LIMIT 1"
+                ) as cur:
+                    sending = await cur.fetchone()
+                campaign_id: int | None = None
+                if sending is not None:
+                    if (
+                        sending[1] is not None
+                        and int(sending[1]) > timestamp
+                    ):
+                        await self._music_db.commit()
+                        return None
+                    campaign_id = int(sending[0])
+                    cursor = await self._music_db.execute(
+                        "UPDATE music_campaign_outbox SET runner_token = ?, "
+                        "runner_lease_until = ? WHERE campaign_id = ? "
+                        "AND status = 'sending' AND (runner_lease_until IS NULL "
+                        "OR runner_lease_until <= ?)",
+                        (token, lease_until, campaign_id, timestamp),
+                    )
+                    if cursor.rowcount != 1:
+                        await self._music_db.commit()
+                        return None
+                else:
+                    async with self._music_db.execute(
+                        "SELECT slot_no FROM music_campaign_outbox "
+                        "WHERE week_key = ? AND slot_no IS NOT NULL "
+                        "ORDER BY slot_no",
+                        (week,),
+                    ) as cur:
+                        reserved = {int(row[0]) for row in await cur.fetchall()}
+                    slot_no = None
+                    if len(reserved) < weekly_limit:
+                        slot_no = next(
+                            (
+                                slot for slot in range(1, weekly_limit + 1)
+                                if slot not in reserved
+                            ),
+                            None,
+                        )
+                    if slot_no is None:
+                        await self._music_db.commit()
+                        return None
+                    async with self._music_db.execute(
+                        "SELECT campaign_id, notification_mask "
+                        "FROM music_campaign_outbox WHERE status = 'queued' "
+                        "AND eligible_at <= ? AND "
+                        "(expires_at IS NULL OR expires_at > ?) "
+                        "ORDER BY priority DESC, eligible_at, campaign_id LIMIT 1",
+                        (timestamp, timestamp),
+                    ) as cur:
+                        ready = await cur.fetchone()
+                    if ready is None:
+                        await self._music_db.commit()
+                        return None
+                    campaign_id = int(ready[0])
+                    mask = self._validate_notification_mask(
+                        ready[1], allow_zero=False
+                    )
+                    async with self._music_db.execute(
+                        "SELECT COALESCE(MAX(user_id), 0) FROM users "
+                        "WHERE is_active = 1 AND (notification_mask & ?) != 0",
+                        (mask,),
+                    ) as cur:
+                        upper = await cur.fetchone()
+                    audience_upper = int(upper[0]) if upper else 0
+                    cursor = await self._music_db.execute(
+                        "UPDATE music_campaign_outbox SET status = 'sending', "
+                        "week_key = ?, slot_no = ?, audience_upper_user_id = ?, "
+                        "broadcast_cursor = 0, broadcast_sent = 0, "
+                        "broadcast_inactive = 0, broadcast_failed = 0, "
+                        "runner_token = ?, runner_lease_until = ?, "
+                        "started_at = ? WHERE campaign_id = ? "
+                        "AND status = 'queued'",
+                        (
+                            week, slot_no, audience_upper, token, lease_until,
+                            timestamp, campaign_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("music campaign slot claim was lost")
+
+                async with self._music_db.execute(
+                    "SELECT " + self._music_campaign_select()
+                    + " FROM music_campaign_outbox WHERE campaign_id = ?",
+                    (campaign_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+                await self._music_db.commit()
+            except BaseException:
+                await self._music_db.rollback()
+                raise
+        campaign = self._decode_music_campaign_row(row)
+        if campaign is None:
+            raise RuntimeError("claimed music campaign payload is invalid")
+        return campaign
+
+    async def checkpoint_music_campaign(
+        self,
+        campaign_id: int,
+        runner_token: str,
+        user_id: int,
+        outcome: str,
+        *,
+        lease_seconds: int = 120,
+    ) -> bool:
+        """Advance one terminal recipient and renew the delivery lease."""
+        columns = {
+            "sent": "broadcast_sent",
+            "inactive": "broadcast_inactive",
+            "failed": "broadcast_failed",
+        }
+        column = columns.get(outcome)
+        if column is None:
+            raise ValueError(f"unknown broadcast outcome: {outcome!r}")
+        recipient = int(user_id)
+        cursor = await self._music_db.execute(
+            f"UPDATE music_campaign_outbox SET broadcast_cursor = ?, "
+            f"{column} = {column} + 1, runner_lease_until = ? "
+            "WHERE campaign_id = ? AND runner_token = ? "
+            "AND status = 'sending' AND broadcast_cursor < ? "
+            "AND audience_upper_user_id >= ?",
+            (
+                recipient, int(time.time()) + max(30, int(lease_seconds)),
+                int(campaign_id), runner_token, recipient, recipient,
+            ),
+        )
+        await self._music_db.commit()
+        return cursor.rowcount == 1
+
+    async def complete_music_campaign(
+        self, campaign_id: int, runner_token: str,
+    ) -> bool:
+        cursor = await self._music_db.execute(
+            "UPDATE music_campaign_outbox SET status = 'completed', "
+            "runner_token = NULL, runner_lease_until = NULL, completed_at = ? "
+            "WHERE campaign_id = ? AND runner_token = ? "
+            "AND status = 'sending'",
+            (int(time.time()), int(campaign_id), runner_token),
+        )
+        await self._music_db.commit()
+        return cursor.rowcount == 1
+
+    async def release_music_campaign(
+        self, campaign_id: int, runner_token: str,
+    ) -> None:
+        """Make a graceful-shutdown campaign immediately reclaimable."""
+        await self._music_db.execute(
+            "UPDATE music_campaign_outbox SET runner_token = NULL, "
+            "runner_lease_until = NULL WHERE campaign_id = ? "
+            "AND runner_token = ? AND status = 'sending'",
+            (int(campaign_id), runner_token),
+        )
+        await self._music_db.commit()
+
+    async def fail_music_campaign(
+        self, campaign_id: int, runner_token: str,
+    ) -> bool:
+        """Terminally reject an invalid frozen payload without freeing its slot."""
+        cursor = await self._music_db.execute(
+            "UPDATE music_campaign_outbox SET status = 'failed', "
+            "runner_token = NULL, runner_lease_until = NULL, completed_at = ? "
+            "WHERE campaign_id = ? AND runner_token = ? "
+            "AND status = 'sending'",
+            (int(time.time()), int(campaign_id), runner_token),
+        )
+        await self._music_db.commit()
         return cursor.rowcount == 1
 
     # ── audio cache (used from Feature A onward) ─────────

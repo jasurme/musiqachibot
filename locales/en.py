@@ -14,6 +14,11 @@ STRINGS = {
     "cmd_start": "Start",
     "cmd_round": "Make a round video",
     "cmd_top_music": "Top Music",
+    "cmd_new_music": "New Music",
+    "cmd_rising": "Rising music",
+    "cmd_discoveries": "Weekly discoveries",
+    "cmd_moods": "Music by mood",
+    "cmd_notifications": "Music notifications",
     "cmd_lang": "Change language",
     "cmd_privacy": "Privacy information",
     "cmd_delete_my_data": "Delete my stored data",
@@ -27,7 +32,8 @@ STRINGS = {
         "Uploaded media and recognition samples are deleted locally after processing.\n\n"
         "Short samples or metadata may be processed by Shazam/AudD; searches and "
         "downloads contact the source services; lyric requests contact lyrics.ovh; "
-        "and Railway plus any configured proxy process network traffic. Use "
+        "and Railway plus any configured proxy process network traffic. Manage "
+        "periodic music notifications with /notifications. Use "
         "/delete_my_data to remove data associated with your user ID."
     ),
     "data_deleted": "✅ Data associated with your user ID was deleted.",
@@ -53,6 +59,40 @@ STRINGS = {
     "top_music_unavailable": (
         "⚠️ Top Music is not ready yet. Please try again shortly."
     ),
+    "new_music_header": "<b>🔥 New Music</b>",
+    "rising_header": "<b>🚀 Rising Now</b>",
+    "discoveries_header": "<b>💎 Weekly Discoveries</b>",
+    "moods_header": "<b>🎭 Choose a mood</b>",
+    "mood_night": "🌙 Night Vibes",
+    "mood_road": "🚗 For the Road",
+    "mood_workout": "🏋️ Workout",
+    "mood_calm": "💔 Calm Songs",
+    "mood_weekend": "🎉 Weekend Mood",
+    "mood_night_header": "<b>🌙 Night Vibes</b>",
+    "mood_road_header": "<b>🚗 For the Road</b>",
+    "mood_workout_header": "<b>🏋️ Workout</b>",
+    "mood_calm_header": "<b>💔 Calm Songs</b>",
+    "mood_weekend_header": "<b>🎉 Weekend Mood</b>",
+    "music_campaign_unavailable": (
+        "⚠️ This list is not ready yet. Please try again shortly."
+    ),
+    "btn_back": "⬅️ Back",
+    "btn_open_moods": "🎭 Music by mood",
+    "btn_notifications_off": "🔕 Disable",
+    "btn_notification_settings": "⚙️ Settings",
+    "notifications_header": (
+        "<b>🔔 Music notifications</b>\n"
+        "Choose which updates you want to receive:"
+    ),
+    "notification_new_music": "New Music",
+    "notification_rising": "Rising Now",
+    "notification_discoveries": "Weekly Discoveries",
+    "btn_notifications_all_on": "🔔 Enable all",
+    "btn_notifications_all_off": "🔕 Disable all",
+    "notifications_saved": "✅ Saved.",
+    "notifications_category_disabled": "🔕 {name} notifications disabled.",
+    "notifications_all_enabled": "🔔 All music notifications enabled.",
+    "notifications_all_disabled": "🔕 All music notifications disabled.",
     # Feature D — links
     "fetching": "🔎 Fetching info...",
     "choose_quality": "🎬 Choose quality:",

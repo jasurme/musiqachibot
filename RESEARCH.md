@@ -292,15 +292,35 @@ python-dotenv
   unique Apple IDs, reuses existing resolutions, resolves new tracks through
   the bounded YouTube search worker, and atomically swaps the complete JSON
   snapshot. Partial/error results keep the last-good snapshot.
-- **Announcements:** only a changed ordered-ID fingerprint queues a durable,
-  keyset-checkpointed fan-out. A Railway restart resumes from the stored cursor;
-  at-least-once delivery can duplicate at most the last uncheckpointed send.
+- **Announcements:** the Top 10 is now request-driven so it does not compete
+  with the reviewed weekly campaign notification budget.
 - **Presentation:** the Telegram UI shows only “Top Music” plus ten direct
   track-download buttons. Backend source details remain documented here;
   artwork and previews are deliberately not republished.
 
 Primary references: [Apple Marketing Resources & Tools](https://performance-partners.apple.com/tools)
 and [Telegram inline keyboards](https://core.telegram.org/bots/features#inline-keyboards).
+
+## 14. Weekly discovery campaigns (2026-08-08)
+
+- **Editorial inputs:** validated public Apple Top-100 feeds for UZ plus a
+  weighted KZ/RU/TR/US quorum. Apple exposes no public New Music RSS feed, so
+  New Music filters ranked songs by release date; Discoveries selects diverse
+  regional tracks outside the obvious UZ Top 10.
+- **Rising:** daily UZ ranking history supplies a six-to-seven-day comparison.
+  At least three meaningful movers are required before the Wednesday campaign;
+  a first deployment therefore needs about one week to establish its baseline.
+- **Moods:** night, road, workout, calm, and weekend are bounded YouTube search
+  builds. Each collection publishes only after ten unique, duration-checked
+  tracks resolve; one failed mood keeps its own last-good snapshot without
+  invalidating the other four.
+- **Cadence:** Monday Discoveries, conditional Wednesday Rising, and Friday New
+  Music use Asia/Tashkent time. Mood libraries refresh weekly and are promoted
+  from those messages rather than creating five additional pushes.
+- **Delivery:** locale-neutral immutable outbox rows freeze the five buttons,
+  opt-in category, audience ceiling, and cursor. Delivery is paced, restart
+  resumable, and capped at three proactive music campaigns per ISO week. Users
+  can opt out per category with `/notifications` while commands remain usable.
 
 ### Current next step
 Deploy the tested Docker image, configure Railway secrets directly, and run a

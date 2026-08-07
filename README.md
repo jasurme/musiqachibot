@@ -46,7 +46,8 @@ challenge solver (`brew install deno` on macOS). The Docker image includes both.
 - [x] **Feature D** — social-media link → **quality picker** (360/480/720/1080/Audio)
 - [x] **Confirmed admin video broadcast** — choose normal/circle, preview converted media, confirm, then fan out with one instant Top Music button
 - [x] **Durable admin announcements** — immediate non-command messages and files resume from their SQLite cursor after a restart
-- [x] **/top_music** — persisted Top Music chart with direct track buttons, refreshed off-path every 48 hours and announced automatically when it changes
+- [x] **/top_music** — persisted Top Music chart with direct track buttons, refreshed off-path every 48 hours
+- [x] **Weekly music campaigns** — New Music, real rank movers, discoveries, five persisted mood libraries, and per-user notification controls
 - [x] **file_id/search/recognition caches** + bounded global/per-user concurrent jobs
 - [x] Killable, concurrency-limited provider workers with byte/duration/deadline guards
 - [x] Shazamio recognition with optional **AudD fallback** (`AUDD_TOKEN`)
@@ -89,13 +90,23 @@ interact privately with the bot again.
 The media button and `/top_music` read only a complete SQLite snapshot, so no
 chart lookup happens on the user request path. A background task checks Apple’s
 official Uzbekistan Top Songs feed every `TOP_MUSIC_REFRESH_HOURS=48`, resolves
-all ten download choices before atomically activating a changed chart, retains
-the last-good snapshot on any error, and resumes a pending chart announcement
-after a restart. Users receive ten full-width track buttons and can start an
-exact-track download with one tap. Selecting an audio that has not previously
-been sent still performs the normal one-time download/upload; Telegram's
-`file_id` cache makes later sends instant. Backend source details are not shown
-in the Telegram response.
+all ten download choices before atomically activating a changed chart, and
+retains the last-good snapshot on any error. Users receive ten full-width track
+buttons and can start an exact-track download with one tap. Selecting an audio
+that has not previously been sent still performs the normal one-time
+download/upload; Telegram's `file_id` cache makes later sends instant. Backend
+source details are not shown in the Telegram response.
+
+The same off-request-path design powers `/new_music`, `/rising`,
+`/discoveries`, and `/moods`. New Music and Discoveries always store five
+resolved tracks; Rising uses retained ranking history and notifies only when at
+least three songs have meaningfully moved. Night, road, workout, calm, and
+weekend each keep exactly ten last-good tracks and refresh weekly. Proactive
+messages are limited to Monday Discoveries, conditional Wednesday Rising, and
+Friday New Music in Asia/Tashkent. Users can disable any category from its
+message or with `/notifications`; the interactive commands remain available.
+Campaign payloads, audience bounds, and recipient cursors survive Railway
+restarts.
 
 ## Railway / cloud YouTube setup
 
@@ -123,9 +134,9 @@ bot/
   main.py            entrypoint (dispatcher, routers, middleware)
   config.py          env loading
   i18n.py            translation lookup
-  handlers/          confirmed broadcasts, Top 10, downloads, search, recognition
-  services/          charts/fan-out, downloader, ffmpeg, recognizer, search
-  db/storage.py      sqlite: users, Top 10 state, drafts, sessions + file_id cache
+  handlers/          broadcasts, stored music lists, downloads, search, recognition
+  services/          charts/campaigns, fan-out, downloader, ffmpeg, recognition
+  db/storage.py      sqlite: users, collections, outbox, drafts, sessions + caches
   middlewares/       private-user registration + i18n locale resolution
 locales/             uz / ru / en strings
 ```
