@@ -13,7 +13,7 @@ STRINGS = {
     "language_set": "✅ Til oʻzgartirildi.",
     "cmd_start": "Boshlash",
     "cmd_round": "Doira video qilish",
-    "cmd_top_music": "Oʻzbekiston Top 10 musiqalari",
+    "cmd_top_music": "Top Music",
     "cmd_lang": "Tilni oʻzgartirish",
     "cmd_privacy": "Maxfiylik maʼlumoti",
     "cmd_delete_my_data": "Saqlangan maʼlumotimni oʻchirish",
@@ -53,11 +53,10 @@ STRINGS = {
     "broadcast_draft_expired": "⚠️ Bu eʼlon tugmalari eskirgan. Videoni qayta yuboring.",
     "broadcast_prepare_failed": "❌ Videoni tanlangan formatda tayyorlab boʻlmadi.",
     "broadcast_already_started": "⚠️ Bu eʼlon allaqachon yuborilgan yoki yuborilmoqda.",
-    "btn_top_music": "🎧 Musiqani topish 🇺🇿",
-    "top_music_header": "🔥 <b>Oʻzbekiston Top 10</b>",
-    "top_music_source": "Manba: <a href=\"{url}\">Apple Music — Oʻzbekiston Top Songs</a>",
+    "btn_top_music": "🎧 Musiqani topish",
+    "top_music_header": "<b>Top Music</b>",
     "top_music_unavailable": (
-        "⚠️ Top 10 roʻyxati hozircha tayyor emas. Birozdan soʻng qayta urinib koʻring."
+        "⚠️ Top Music hozircha tayyor emas. Birozdan soʻng qayta urinib koʻring."
     ),
     # Feature D — links
     "fetching": "🔎 Maʼlumot olinmoqda...",

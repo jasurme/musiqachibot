@@ -1,50 +1,63 @@
-"""Instant Uzbekistan Top 10 command and announcement-button callback."""
+"""Instant Top Music command and direct-download callbacks."""
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from bot.handlers.results import present
-from bot.services.top_music import load_top_music
+from bot.config import Config
+from bot.handlers.results import deliver_track
+from bot.services.search import SearchItem
+from bot.services.top_music import (
+    TOP_MUSIC_PICK_PREFIX,
+    load_top_music,
+    parse_top_music_pick,
+    top_music_list_keyboard,
+)
 
 router = Router(name="top_music")
 
-_APPLE_CHART_URL = "https://music.apple.com/uz/new/top-charts/songs"
 
-
-async def send_top_music(
-    message: Message, _, db, *, owner_user_id: int | None,
-) -> None:
+async def send_top_music(message: Message, _, db) -> None:
     """Render only the last complete DB snapshot; never perform network work."""
     items = await load_top_music(db)
     if len(items) != 10:
         await message.answer(_("top_music_unavailable"))
         return
-    header = (
-        _("top_music_header")
-        + "\n"
-        + _("top_music_source", url=_APPLE_CHART_URL)
-    )
-    await present(
-        message, _, db,
-        header=header, items=items, per_page=10,
-        owner_user_id=owner_user_id,
+    await message.answer(
+        _("top_music_header"),
+        reply_markup=top_music_list_keyboard(items),
     )
 
 
 @router.message(Command("top_music"))
 async def cmd_top_music(message: Message, _, db, **kwargs) -> None:
-    await send_top_music(
-        message, _, db,
-        owner_user_id=message.from_user.id if message.from_user else None,
-    )
+    await send_top_music(message, _, db)
 
 
 @router.callback_query(F.data == "top_music")
 async def on_top_music(callback: CallbackQuery, _, db, **kwargs) -> None:
     await callback.answer()
-    if callback.message is None:
+    if not isinstance(callback.message, Message):
         return
-    await send_top_music(
-        callback.message, _, db, owner_user_id=callback.from_user.id,
-    )
+    await send_top_music(callback.message, _, db)
+
+
+@router.callback_query(F.data.startswith(TOP_MUSIC_PICK_PREFIX))
+async def on_top_music_pick(
+    callback: CallbackQuery, _, config: Config, db, bot_username: str, **kwargs,
+) -> None:
+    """Download the exact durable video ID embedded in a Top Music button."""
+    video_id = parse_top_music_pick(callback.data)
+    if video_id is None or not isinstance(callback.message, Message):
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
+
+    # Current metadata improves cached-file titles. The video ID in callback
+    # data remains sufficient after chart replacement or a Railway restart.
+    items = await load_top_music(db)
+    item = next((item for item in items if item.video_id == video_id), None)
+    if item is None:
+        item = SearchItem(
+            video_id=video_id, title="", duration=None, uploader=""
+        )
+    await deliver_track(callback, _, config, db, bot_username, item)

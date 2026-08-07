@@ -59,14 +59,15 @@ When `ADMIN_USER_ID` sends a private normal video or circle, the bot does not
 send it immediately. Choose **normal video** or **circle**, then press the
 confirmation button. Cross-format conversion downloads at most
 `MAX_INPUT_MB`; same-format Telegram copies do not need that download. Every
-delivered video gets one callback button that opens the already stored Top 10.
+delivered video gets one callback button that opens the already stored Top
+Music chart as ten direct track-download buttons.
 
 The Top 10 source is Apple’s official unauthenticated Uzbekistan Top Songs RSS
-feed. Refresh/search work runs in the background; `/top_music` and media-button
-clicks perform no provider request. Only a complete ten-track snapshot replaces
-the previous one, and an unchanged chart is not broadcast again. Keep one
-Railway replica and retain `overlapSeconds=0` so only one scheduler owns the
-SQLite state and Telegram polling.
+feed. Refresh/search work runs in the background; opening `/top_music` or its
+media button performs no provider request. Only a complete ten-track snapshot
+replaces the previous one, and an unchanged chart is not broadcast again. Keep
+one Railway replica and retain `overlapSeconds=0` so only one scheduler owns
+the SQLite state and Telegram polling.
 
 ## 4. ⚠️ Fix Railway's YouTube bot-check
 

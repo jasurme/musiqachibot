@@ -1,18 +1,22 @@
 """Focused tests for the persisted, off-request-path Top 10 pipeline."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from bot.db.storage import Storage
+from bot.services.downloader import DownloadResult
 from bot.services.search import SearchItem
 from bot.services.top_music import (
     _resolve_chart,
     broadcast_pending_top_music,
     load_top_music,
+    parse_top_music_pick,
     refresh_top_music_once,
     render_top_music_chart,
     top_music_keyboard,
+    top_music_list_keyboard,
 )
 from tests.conftest import callback_update, text_update
 
@@ -214,8 +218,13 @@ async def test_pending_chart_broadcast_checkpoints_and_completes():
     class FakeBot:
         async def send_message(self, *, chat_id, text, reply_markup):
             sent_to.append(chat_id)
-            assert "Apple Music" in text
-            assert reply_markup.inline_keyboard[0][0].callback_data == "top_music"
+            assert text == "<b>Top Music</b>"
+            assert len(reply_markup.inline_keyboard) == 10
+            assert all(len(row) == 1 for row in reply_markup.inline_keyboard)
+            assert all(
+                row[0].callback_data.startswith("topdl:")
+                for row in reply_markup.inline_keyboard
+            )
             return object()
 
     async def broadcaster(**kwargs):
@@ -286,14 +295,28 @@ async def test_pending_chart_broadcast_resumes_after_restart(tmp_path):
     await reopened.close()
 
 
-def test_top_music_markup_and_attributed_chart_text():
+def test_top_music_markups_are_minimal_full_width_and_safely_bounded():
     button = top_music_keyboard().inline_keyboard[0][0]
-    assert button.text == "🎧 Musiqani topish 🇺🇿"
+    assert button.text == "🎧 Musiqani topish"
     assert button.callback_data == "top_music"
-    text = render_top_music_chart(_chart())
-    assert "Oʻzbekistondagi Top 10" in text
-    assert "Apple Music" in text
-    assert "music.apple.com/uz" in text
+    assert render_top_music_chart(_chart()) == "<b>Top Music</b>"
+
+    chart = _chart()
+    ordinary_markup = top_music_list_keyboard(chart)
+    assert [row[0].text for row in ordinary_markup.inline_keyboard] == [
+        f"Artist {index} — Song {index}" for index in range(10)
+    ]
+
+    chart[0]["title"] = "Very long title " * 20
+    markup = top_music_list_keyboard(chart)
+    assert len(markup.inline_keyboard) == 10
+    assert all(len(row) == 1 for row in markup.inline_keyboard)
+    assert all(len(row[0].text) <= 100 for row in markup.inline_keyboard)
+    callbacks = [row[0].callback_data for row in markup.inline_keyboard]
+    assert callbacks == [f"topdl:video-{index}" for index in range(10)]
+    assert all(len(data.encode("utf-8")) <= 64 for data in callbacks)
+    assert parse_top_music_pick(callbacks[0]) == "video-0"
+    assert parse_top_music_pick("topdl:not valid") is None
 
 
 async def test_top_music_command_and_media_callback_are_snapshot_only(
@@ -311,16 +334,16 @@ async def test_top_music_command_and_media_callback_are_snapshot_only(
 
     await dp.feed_update(bot, text_update("/top_music", user_id=321, chat_id=321))
     first = cap.last("SendMessage")
-    assert "Uzbekistan Top 10" in first.text
-    assert "Apple Music" in first.text
-    assert "<b>10.</b>" in first.text
+    assert first.text == "<b>Top Music</b>"
     picks = [
         button.callback_data
         for row in first.reply_markup.inline_keyboard
         for button in row
     ]
     assert len(picks) == 10
-    assert all(data.startswith("pick:") for data in picks)
+    assert len(first.reply_markup.inline_keyboard) == 10
+    assert all(len(row) == 1 for row in first.reply_markup.inline_keyboard)
+    assert picks == [f"topdl:video-{index}" for index in range(10)]
 
     before = len(cap.by("SendMessage"))
     await dp.feed_update(
@@ -329,3 +352,68 @@ async def test_top_music_command_and_media_callback_are_snapshot_only(
     )
     assert len(cap.by("SendMessage")) == before + 1
     assert cap.last("AnswerCallbackQuery") is not None
+
+
+async def test_old_top_music_direct_button_survives_chart_replacement(
+    dp, bot, cap, storage,
+):
+    await _publish(storage, _chart(), now=100)
+    old_callback = (
+        top_music_list_keyboard(_chart()).inline_keyboard[0][0].callback_data
+    )
+    await storage.set_cached_audio(
+        f"bot:{bot.id}:ytaudio:video-0", "OLD_TOP_FILE_ID", "Old song"
+    )
+    await storage.complete_top_music_broadcast(1)
+
+    replacement = _chart("replacement")
+    for index, item in enumerate(replacement):
+        item["video_id"] = f"fresh-{index}"
+    await _publish(storage, replacement, now=200)
+    assert all(
+        item.video_id != "video-0" for item in await load_top_music(storage)
+    )
+
+    await dp.feed_update(
+        bot,
+        callback_update(old_callback, uid=120, user_id=321, chat_id=321),
+    )
+
+    sent = cap.last("SendAudio")
+    assert sent is not None and sent.audio == "OLD_TOP_FILE_ID"
+    assert cap.last("AnswerCallbackQuery").text is None
+
+
+async def test_top_music_direct_button_uses_shared_download_and_cache_path(
+    dp, bot, cap, storage, config, monkeypatch,
+):
+    await _publish(storage, _chart(), now=100)
+    calls: list[tuple[str, int]] = []
+
+    async def fake_download(url, out_dir, max_bytes=None):
+        calls.append((url, max_bytes))
+        path = Path(out_dir) / "top-track.m4a"
+        path.write_bytes(b"audio-data")
+        return DownloadResult(
+            path=str(path), title="Top track", uploader="Artist",
+            duration=180, ext="m4a",
+        )
+
+    monkeypatch.setattr(
+        "bot.handlers.results.downloader.download_audio", fake_download
+    )
+    await dp.feed_update(
+        bot,
+        callback_update("topdl:video-0", uid=130, user_id=321, chat_id=321),
+    )
+
+    assert calls == [
+        (
+            "https://www.youtube.com/watch?v=video-0",
+            config.max_file_mb * 1024 * 1024,
+        )
+    ]
+    assert cap.last("SendAudio") is not None
+    assert await storage.get_cached_audio(
+        f"bot:{bot.id}:ytaudio:video-0"
+    ) is not None

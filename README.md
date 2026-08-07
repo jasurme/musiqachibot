@@ -44,9 +44,9 @@ challenge solver (`brew install deno` on macOS). The Docker image includes both.
 - [x] **Lyrics** button for recognized tracks (lyrics.ovh, free/no-key)
 - [x] **Feature C** — voice/audio/video/video-note → **recognize** (Shazamio) → album art + "Song title/Artist" header + results list + Lyrics/Video buttons
 - [x] **Feature D** — social-media link → **quality picker** (360/480/720/1080/Audio)
-- [x] **Confirmed admin video broadcast** — choose normal/circle, preview converted media, confirm, then fan out with one instant Top 10 button
+- [x] **Confirmed admin video broadcast** — choose normal/circle, preview converted media, confirm, then fan out with one instant Top Music button
 - [x] **Durable admin announcements** — immediate non-command messages and files resume from their SQLite cursor after a restart
-- [x] **/top_music** — persisted Uzbekistan Top 10, refreshed off-path every 48 hours and announced automatically when the chart changes
+- [x] **/top_music** — persisted Top Music chart with direct track buttons, refreshed off-path every 48 hours and announced automatically when it changes
 - [x] **file_id/search/recognition caches** + bounded global/per-user concurrent jobs
 - [x] Killable, concurrency-limited provider workers with byte/duration/deadline guards
 - [x] Shazamio recognition with optional **AudD fallback** (`AUDD_TOKEN`)
@@ -91,10 +91,11 @@ chart lookup happens on the user request path. A background task checks Apple’
 official Uzbekistan Top Songs feed every `TOP_MUSIC_REFRESH_HOURS=48`, resolves
 all ten download choices before atomically activating a changed chart, retains
 the last-good snapshot on any error, and resumes a pending chart announcement
-after a restart. The list itself opens immediately; selecting an audio that has
-not previously been sent still performs the normal one-time download/upload,
-then Telegram's `file_id` cache makes later sends instant. The list links back
-to Apple Music as its chart source.
+after a restart. Users receive ten full-width track buttons and can start an
+exact-track download with one tap. Selecting an audio that has not previously
+been sent still performs the normal one-time download/upload; Telegram's
+`file_id` cache makes later sends instant. Backend source details are not shown
+in the Telegram response.
 
 ## Railway / cloud YouTube setup
 

@@ -8,8 +8,8 @@ only after all ten unique tracks have resolved successfully.
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -26,20 +26,61 @@ APPLE_TOP_SONGS_URL = (
     "https://rss.marketingtools.apple.com/api/v2/uz/music/"
     "most-played/10/songs.json"
 )
-APPLE_CHART_PAGE_URL = "https://music.apple.com/uz/new/top-charts/songs"
 REFRESH_INTERVAL_SECONDS = 2 * 24 * 60 * 60
 REFRESH_LEASE_SECONDS = 15 * 60
 SCHEDULER_MAX_SLEEP_SECONDS = 60 * 60
+TOP_MUSIC_HEADER = "<b>Top Music</b>"
+TOP_MUSIC_PICK_PREFIX = "topdl:"
+_YOUTUBE_VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{6,32}")
+# Long names intentionally wrap like Telegram's native chart keyboards. Keep a
+# generous UI bound without confusing it with callback_data's separate 64-byte
+# Bot API limit.
+_BUTTON_TEXT_MAX = 100
 
 
 def top_music_keyboard() -> InlineKeyboardMarkup:
-    """The one-button markup requested for bot-authored announcements."""
+    """Open Top Music from an administrator's video announcement."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(
-            text="🎧 Musiqani topish 🇺🇿",
+            text="🎧 Musiqani topish",
             callback_data="top_music",
         )]]
     )
+
+
+def _top_music_item_value(item: Any, name: str) -> Any:
+    return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+
+def top_music_list_keyboard(items: list[Any]) -> InlineKeyboardMarkup:
+    """Build ten full-row, durable direct-download buttons."""
+    if len(items) != 10:
+        raise ValueError("Top Music keyboard requires exactly 10 tracks")
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in items:
+        video_id = str(_top_music_item_value(item, "video_id") or "").strip()
+        if _YOUTUBE_VIDEO_ID.fullmatch(video_id) is None:
+            raise ValueError("Top Music track has an invalid YouTube video ID")
+        title = " ".join(
+            str(_top_music_item_value(item, "title") or "").split()
+        )
+        if not title:
+            raise ValueError("Top Music track has an empty title")
+        if len(title) > _BUTTON_TEXT_MAX:
+            title = title[:_BUTTON_TEXT_MAX - 1].rstrip() + "…"
+        rows.append([InlineKeyboardButton(
+            text=title,
+            callback_data=f"{TOP_MUSIC_PICK_PREFIX}{video_id}",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def parse_top_music_pick(data: str | None) -> str | None:
+    """Return a validated durable video ID from a chart-track callback."""
+    if not data or not data.startswith(TOP_MUSIC_PICK_PREFIX):
+        return None
+    video_id = data.removeprefix(TOP_MUSIC_PICK_PREFIX)
+    return video_id if _YOUTUBE_VIDEO_ID.fullmatch(video_id) else None
 
 
 def _parse_apple_feed(payload: Any) -> list[dict]:
@@ -182,23 +223,10 @@ async def load_top_music(db) -> list[SearchItem]:
 
 
 def render_top_music_chart(items: list[Any]) -> str:
-    """Render one compact Uzbek chart notification within Telegram limits."""
-    lines = ["🇺🇿 <b>Oʻzbekistondagi Top 10 qoʻshiqlar</b>", ""]
-    for rank, item in enumerate(items[:10], start=1):
-        if isinstance(item, dict):
-            title = item.get("title") or (
-                f'{item.get("artist", "")} — {item.get("name", "")}'
-            )
-        else:
-            title = getattr(item, "title", "")
-        title = " ".join(str(title).split())
-        lines.append(f"<b>{rank}.</b> {html.escape(title[:250])}")
-    lines.extend((
-        "",
-        "Manba: "
-        f'<a href="{APPLE_CHART_PAGE_URL}">Apple Music — Oʻzbekiston Top Songs</a>',
-    ))
-    return "\n".join(lines)
+    """Render the intentionally minimal chart heading; tracks are buttons."""
+    if len(items) != 10:
+        raise ValueError("Top Music notification requires exactly 10 tracks")
+    return TOP_MUSIC_HEADER
 
 
 async def refresh_top_music_once(
@@ -272,12 +300,13 @@ async def broadcast_pending_top_music(
         broadcaster = broadcast_active
 
     text = render_top_music_chart(state["items"])
+    markup = top_music_list_keyboard(state["items"])
 
     async def send_one(user_id: int):
         return await bot.send_message(
             chat_id=user_id,
             text=text,
-            reply_markup=top_music_keyboard(),
+            reply_markup=markup,
         )
 
     async def checkpoint(user_id: int, outcome: str) -> None:

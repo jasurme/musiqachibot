@@ -295,8 +295,9 @@ python-dotenv
 - **Announcements:** only a changed ordered-ID fingerprint queues a durable,
   keyset-checkpointed fan-out. A Railway restart resumes from the stored cursor;
   at-least-once delivery can duplicate at most the last uncheckpointed send.
-- **Attribution:** show rank/title/artist and link to Apple Music's Uzbekistan
-  chart. Artwork and previews are deliberately not republished.
+- **Presentation:** the Telegram UI shows only “Top Music” plus ten direct
+  track-download buttons. Backend source details remain documented here;
+  artwork and previews are deliberately not republished.
 
 Primary references: [Apple Marketing Resources & Tools](https://performance-partners.apple.com/tools)
 and [Telegram inline keyboards](https://core.telegram.org/bots/features#inline-keyboards).

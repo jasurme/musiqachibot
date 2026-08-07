@@ -13,7 +13,7 @@ STRINGS = {
     "language_set": "✅ Language changed.",
     "cmd_start": "Start",
     "cmd_round": "Make a round video",
-    "cmd_top_music": "Uzbekistan Top 10 music",
+    "cmd_top_music": "Top Music",
     "cmd_lang": "Change language",
     "cmd_privacy": "Privacy information",
     "cmd_delete_my_data": "Delete my stored data",
@@ -48,11 +48,10 @@ STRINGS = {
     "broadcast_draft_expired": "⚠️ These broadcast buttons expired. Send the video again.",
     "broadcast_prepare_failed": "❌ Couldn't prepare the selected video format.",
     "broadcast_already_started": "⚠️ This broadcast was already sent or is in progress.",
-    "btn_top_music": "🎧 Find music 🇺🇿",
-    "top_music_header": "🔥 <b>Uzbekistan Top 10</b>",
-    "top_music_source": "Source: <a href=\"{url}\">Apple Music — Uzbekistan Top Songs</a>",
+    "btn_top_music": "🎧 Find music",
+    "top_music_header": "<b>Top Music</b>",
     "top_music_unavailable": (
-        "⚠️ The Top 10 list is not ready yet. Please try again shortly."
+        "⚠️ Top Music is not ready yet. Please try again shortly."
     ),
     # Feature D — links
     "fetching": "🔎 Fetching info...",

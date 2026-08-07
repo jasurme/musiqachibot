@@ -205,29 +205,11 @@ async def _send_cached_track(
     return True
 
 
-@router.callback_query(F.data.startswith("pick:"))
-async def on_pick(callback: CallbackQuery, _, config: Config, db, bot_username: str, **kwargs):
-    try:
-        _prefix, token, idx = callback.data.split(":", 2)
-    except ValueError:
-        await callback.answer()
-        return
-    if not idx.isdecimal():
-        await callback.answer(_("invalid_action"), show_alert=True)
-        return
-    sess = await _get_session(token, db)
-    if not sess:
-        await callback.answer(_("link_expired"), show_alert=True)
-        return
-    if sess.get("owner_user_id") not in {None, callback.from_user.id}:
-        await callback.answer(_("invalid_action"), show_alert=True)
-        return
-    idx = int(idx)
-    items = sess["items"]
-    if not 0 <= idx < len(items):
-        await callback.answer(_("invalid_action"), show_alert=True)
-        return
-    item = items[idx]
+async def deliver_track(
+    callback: CallbackQuery, _, config: Config, db, bot_username: str,
+    item: SearchItem,
+) -> None:
+    """Deliver one exact search item through the shared cache/download path."""
     caption = f"👉 @{bot_username}"
     delivery_started = time.perf_counter()
 
@@ -340,6 +322,33 @@ async def on_pick(callback: CallbackQuery, _, config: Config, db, bot_username: 
                 pass
         if claimed:
             jobs.release(callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("pick:"))
+async def on_pick(callback: CallbackQuery, _, config: Config, db, bot_username: str, **kwargs):
+    try:
+        _prefix, token, idx = callback.data.split(":", 2)
+    except ValueError:
+        await callback.answer()
+        return
+    if not idx.isdecimal():
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
+    sess = await _get_session(token, db)
+    if not sess:
+        await callback.answer(_("link_expired"), show_alert=True)
+        return
+    if sess.get("owner_user_id") not in {None, callback.from_user.id}:
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
+    idx = int(idx)
+    items = sess["items"]
+    if not 0 <= idx < len(items):
+        await callback.answer(_("invalid_action"), show_alert=True)
+        return
+    await deliver_track(
+        callback, _, config, db, bot_username, items[idx]
+    )
 
 
 @router.callback_query(F.data.startswith("page:"))
