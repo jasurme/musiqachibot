@@ -13,6 +13,7 @@ STRINGS = {
     "language_set": "✅ Til oʻzgartirildi.",
     "cmd_start": "Boshlash",
     "cmd_round": "Doira video qilish",
+    "cmd_top_music": "Oʻzbekiston Top 10 musiqalari",
     "cmd_lang": "Tilni oʻzgartirish",
     "cmd_privacy": "Maxfiylik maʼlumoti",
     "cmd_delete_my_data": "Saqlangan maʼlumotimni oʻchirish",
@@ -36,6 +37,28 @@ STRINGS = {
         "Faol emas: {inactive}. Xato: {failed}."
     ),
     "broadcast_unsupported": "⚠️ Telegram bu xabar turini nusxalay olmaydi.",
+    "broadcast_choose_format": "Bu videoni qanday yuboray?",
+    "broadcast_btn_normal": "🎬 Oddiy video",
+    "broadcast_btn_circle": "⭕ Yumaloq video",
+    "broadcast_btn_confirm": "✅ Barchaga yuborish",
+    "broadcast_btn_cancel": "❌ Bekor qilish",
+    "broadcast_confirm_normal": (
+        "🎬 Oddiy video sifatida barcha foydalanuvchilarga yuborilsinmi?"
+    ),
+    "broadcast_confirm_circle": (
+        "⭕ Yumaloq video sifatida barcha foydalanuvchilarga yuborilsinmi?"
+    ),
+    "broadcast_preparing": "⏳ Video tayyorlanmoqda…",
+    "broadcast_cancelled": "✅ Eʼlon bekor qilindi.",
+    "broadcast_draft_expired": "⚠️ Bu eʼlon tugmalari eskirgan. Videoni qayta yuboring.",
+    "broadcast_prepare_failed": "❌ Videoni tanlangan formatda tayyorlab boʻlmadi.",
+    "broadcast_already_started": "⚠️ Bu eʼlon allaqachon yuborilgan yoki yuborilmoqda.",
+    "btn_top_music": "🎧 Musiqani topish 🇺🇿",
+    "top_music_header": "🔥 <b>Oʻzbekiston Top 10</b>",
+    "top_music_source": "Manba: <a href=\"{url}\">Apple Music — Oʻzbekiston Top Songs</a>",
+    "top_music_unavailable": (
+        "⚠️ Top 10 roʻyxati hozircha tayyor emas. Birozdan soʻng qayta urinib koʻring."
+    ),
     # Feature D — links
     "fetching": "🔎 Maʼlumot olinmoqda...",
     "choose_quality": "🎬 Sifatni tanlang:",

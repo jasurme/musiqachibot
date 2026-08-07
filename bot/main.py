@@ -19,6 +19,7 @@ from bot.handlers import (
     round as round_handler,
     start,
     text_search,
+    top_music,
     url_download,
 )
 from bot.middlewares.i18n import I18nMiddleware
@@ -28,6 +29,7 @@ from bot.services.downloader import (
     runtime_warnings,
     shutdown_provider_workers,
 )
+from bot.services.top_music import run_top_music_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +91,9 @@ async def _set_commands(bot: Bot, default_locale: str) -> None:
         return [
             BotCommand(command="start", description=t("cmd_start", locale)),
             BotCommand(command="round", description=t("cmd_round", locale)),
+            BotCommand(
+                command="top_music", description=t("cmd_top_music", locale)
+            ),
             BotCommand(command="lang", description=t("cmd_lang", locale)),
             BotCommand(command="privacy", description=t("cmd_privacy", locale)),
             BotCommand(
@@ -112,6 +117,8 @@ async def main() -> None:
     session: AiohttpSession | None = None
     bot: Bot | None = None
     storage: Storage | None = None
+    admin_broadcast_task: asyncio.Task | None = None
+    top_music_task: asyncio.Task | None = None
     try:
         removed = cleanup_stale_runtime_files(config.download_dir)
         if removed:
@@ -153,6 +160,7 @@ async def main() -> None:
         # Order matters: admin broadcasts must preempt every normal workflow;
         # round is state-filtered, and URL must precede catch-all text search.
         dp.include_router(broadcast.router)
+        dp.include_router(top_music.router)
         dp.include_router(round_handler.router)
         dp.include_router(start.router)
         dp.include_router(url_download.router)
@@ -166,8 +174,46 @@ async def main() -> None:
 
         await _set_commands(bot, config.default_locale)
         await bot.delete_webhook(drop_pending_updates=config.drop_pending_updates)
+        # Snapshot resumable manual campaigns before polling can accept a new
+        # Confirm callback. Delivery stays in the background, while the fixed
+        # token set prevents one new campaign from acquiring two runners.
+        pending_admin_broadcasts = await storage.list_sending_broadcast_drafts(
+            config.admin_user_id
+        )
+        admin_broadcast_task = asyncio.create_task(
+            broadcast.run_pending_admin_broadcasts(
+                bot, storage, config, drafts=pending_admin_broadcasts
+            ),
+            name="admin-broadcast-resume",
+        )
+        top_music_task = asyncio.create_task(
+            run_top_music_scheduler(bot, storage, config),
+            name="top-music-scheduler",
+        )
         await dp.start_polling(bot)
     finally:
+        if admin_broadcast_task is not None:
+            admin_broadcast_task.cancel()
+            try:
+                await admin_broadcast_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "admin broadcast resume shutdown failed: %s",
+                    type(exc).__name__,
+                )
+        if top_music_task is not None:
+            top_music_task.cancel()
+            try:
+                await top_music_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "top music scheduler shutdown failed: %s",
+                    type(exc).__name__,
+                )
         try:
             await shutdown_provider_workers()
         except Exception as exc:

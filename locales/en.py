@@ -13,6 +13,7 @@ STRINGS = {
     "language_set": "✅ Language changed.",
     "cmd_start": "Start",
     "cmd_round": "Make a round video",
+    "cmd_top_music": "Uzbekistan Top 10 music",
     "cmd_lang": "Change language",
     "cmd_privacy": "Privacy information",
     "cmd_delete_my_data": "Delete my stored data",
@@ -35,6 +36,24 @@ STRINGS = {
         "Inactive: {inactive}. Failed: {failed}."
     ),
     "broadcast_unsupported": "⚠️ Telegram cannot copy this message type.",
+    "broadcast_choose_format": "How should this video be sent?",
+    "broadcast_btn_normal": "🎬 Normal video",
+    "broadcast_btn_circle": "⭕ Circle video",
+    "broadcast_btn_confirm": "✅ Send to everyone",
+    "broadcast_btn_cancel": "❌ Cancel",
+    "broadcast_confirm_normal": "🎬 Send this as a normal video to every user?",
+    "broadcast_confirm_circle": "⭕ Send this as a circle video to every user?",
+    "broadcast_preparing": "⏳ Preparing the video…",
+    "broadcast_cancelled": "✅ Broadcast cancelled.",
+    "broadcast_draft_expired": "⚠️ These broadcast buttons expired. Send the video again.",
+    "broadcast_prepare_failed": "❌ Couldn't prepare the selected video format.",
+    "broadcast_already_started": "⚠️ This broadcast was already sent or is in progress.",
+    "btn_top_music": "🎧 Find music 🇺🇿",
+    "top_music_header": "🔥 <b>Uzbekistan Top 10</b>",
+    "top_music_source": "Source: <a href=\"{url}\">Apple Music — Uzbekistan Top Songs</a>",
+    "top_music_unavailable": (
+        "⚠️ The Top 10 list is not ready yet. Please try again shortly."
+    ),
     # Feature D — links
     "fetching": "🔎 Fetching info...",
     "choose_quality": "🎬 Choose quality:",

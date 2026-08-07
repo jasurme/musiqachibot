@@ -44,6 +44,10 @@ class Config:
     admin_user_id: int = 7645204689
     # Stay below Telegram's documented bulk-send ceiling and send sequentially.
     broadcast_rate_per_second: int = 20
+    # Uzbekistan Top 10 is refreshed off the request path. Users always read
+    # the last complete SQLite snapshot, so /top_music stays instant.
+    top_music_refresh_hours: int = 48
+    top_music_retry_minutes: int = 30
 
 
 def _clean(value: str | None) -> str | None:
@@ -126,12 +130,20 @@ def load_config() -> Config:
     broadcast_rate_per_second = _positive_int(
         "BROADCAST_RATE_PER_SECOND", 20
     )
+    top_music_refresh_hours = _positive_int("TOP_MUSIC_REFRESH_HOURS", 48)
+    top_music_retry_minutes = _positive_int("TOP_MUSIC_RETRY_MINUTES", 30)
     if ytdlp_concurrency > 8:
         raise RuntimeError("YTDLP_CONCURRENCY cannot exceed 8")
     if heavy_job_concurrency > 8:
         raise RuntimeError("HEAVY_JOB_CONCURRENCY cannot exceed 8")
     if broadcast_rate_per_second > 25:
         raise RuntimeError("BROADCAST_RATE_PER_SECOND cannot exceed 25")
+    if top_music_refresh_hours > 24 * 30:
+        raise RuntimeError("TOP_MUSIC_REFRESH_HOURS cannot exceed 720")
+    if top_music_retry_minutes >= top_music_refresh_hours * 60:
+        raise RuntimeError(
+            "TOP_MUSIC_RETRY_MINUTES must be shorter than the refresh interval"
+        )
     if ytdlp_sleep_requests >= min(
         ytdlp_job_timeout_seconds, ytdlp_metadata_timeout_seconds
     ):
@@ -169,4 +181,6 @@ def load_config() -> Config:
         privacy_policy_url=_clean(os.getenv("PRIVACY_POLICY_URL")),
         admin_user_id=admin_user_id,
         broadcast_rate_per_second=broadcast_rate_per_second,
+        top_music_refresh_hours=top_music_refresh_hours,
+        top_music_retry_minutes=top_music_retry_minutes,
     )

@@ -44,7 +44,9 @@ challenge solver (`brew install deno` on macOS). The Docker image includes both.
 - [x] **Lyrics** button for recognized tracks (lyrics.ovh, free/no-key)
 - [x] **Feature C** — voice/audio/video/video-note → **recognize** (Shazamio) → album art + "Song title/Artist" header + results list + Lyrics/Video buttons
 - [x] **Feature D** — social-media link → **quality picker** (360/480/720/1080/Audio)
-- [x] **Admin broadcast** — private text/video/video-note/document/media from the configured admin is copied to every active private user
+- [x] **Confirmed admin video broadcast** — choose normal/circle, preview converted media, confirm, then fan out with one instant Top 10 button
+- [x] **Durable admin announcements** — immediate non-command messages and files resume from their SQLite cursor after a restart
+- [x] **/top_music** — persisted Uzbekistan Top 10, refreshed off-path every 48 hours and announced automatically when the chart changes
 - [x] **file_id/search/recognition caches** + bounded global/per-user concurrent jobs
 - [x] Killable, concurrency-limited provider workers with byte/duration/deadline guards
 - [x] Shazamio recognition with optional **AudD fallback** (`AUDD_TOKEN`)
@@ -73,11 +75,26 @@ Cookies are used only to help yt-dlp reach otherwise public media when a source
 bot-checks the server. Private, members-only, premium, and login-only media is
 rejected even if the shared cookie account can access it.
 
-`ADMIN_USER_ID` defaults to `7645204689`. Every copyable message sent by that
-user in the bot's private chat is an announcement; it is copied without forward
-attribution and paced at `BROADCAST_RATE_PER_SECOND=20`. Blocked/deactivated
-recipients are removed from later sends. `/delete_my_data` removes a user from
-the audience until they interact privately with the bot again.
+`ADMIN_USER_ID` defaults to `7645204689`. A video or circle from that private
+chat first gets normal/circle choices and an explicit confirmation; converted
+media is uploaded once and its Telegram `file_id` is reused for the fan-out.
+Other copyable admin messages keep the immediate announcement behavior.
+Every announcement is persisted before its first recipient, so a Railway
+restart resumes the unsent remainder. Slash commands still run normally and
+are never broadcast. Announcements have no forward attribution and are paced at
+`BROADCAST_RATE_PER_SECOND=20`. Blocked/deactivated recipients are removed from
+later sends. `/delete_my_data` removes a user from the audience until they
+interact privately with the bot again.
+
+The media button and `/top_music` read only a complete SQLite snapshot, so no
+chart lookup happens on the user request path. A background task checks Apple’s
+official Uzbekistan Top Songs feed every `TOP_MUSIC_REFRESH_HOURS=48`, resolves
+all ten download choices before atomically activating a changed chart, retains
+the last-good snapshot on any error, and resumes a pending chart announcement
+after a restart. The list itself opens immediately; selecting an audio that has
+not previously been sent still performs the normal one-time download/upload,
+then Telegram's `file_id` cache makes later sends instant. The list links back
+to Apple Music as its chart source.
 
 ## Railway / cloud YouTube setup
 
@@ -105,9 +122,9 @@ bot/
   main.py            entrypoint (dispatcher, routers, middleware)
   config.py          env loading
   i18n.py            translation lookup
-  handlers/          admin broadcast, /start, downloads, search, recognition
-  services/          downloader (yt-dlp), audio (ffmpeg), recognizer, search
-  db/storage.py      sqlite: active users, locale, sessions + file_id cache
+  handlers/          confirmed broadcasts, Top 10, downloads, search, recognition
+  services/          charts/fan-out, downloader, ffmpeg, recognizer, search
+  db/storage.py      sqlite: users, Top 10 state, drafts, sessions + file_id cache
   middlewares/       private-user registration + i18n locale resolution
 locales/             uz / ru / en strings
 ```

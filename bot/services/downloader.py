@@ -400,7 +400,7 @@ _URL_IN_LOG = re.compile(r"(?:https?|socks[45]h?)://[^\s]+", re.IGNORECASE)
 _STALE_MEDIA_FILE = re.compile(r"^(?:audio|video)_[0-9a-f]{12}(?:\..+)?$")
 _STALE_JOB_PREFIXES = (
     ".musiqa_job_audio_", ".musiqa_job_video_",
-    ".musiqa_recognize_", ".musiqa_round_",
+    ".musiqa_recognize_", ".musiqa_round_", ".musiqa_broadcast_",
 )
 
 

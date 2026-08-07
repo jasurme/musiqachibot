@@ -13,6 +13,7 @@ STRINGS = {
     "language_set": "✅ Язык изменён.",
     "cmd_start": "Запустить бота",
     "cmd_round": "Сделать кружочек",
+    "cmd_top_music": "Топ-10 музыки Узбекистана",
     "cmd_lang": "Изменить язык",
     "cmd_privacy": "Информация о конфиденциальности",
     "cmd_delete_my_data": "Удалить сохранённые данные",
@@ -35,6 +36,24 @@ STRINGS = {
         "Неактивных: {inactive}. Ошибок: {failed}."
     ),
     "broadcast_unsupported": "⚠️ Telegram не может скопировать этот тип сообщения.",
+    "broadcast_choose_format": "Как отправить это видео?",
+    "broadcast_btn_normal": "🎬 Обычное видео",
+    "broadcast_btn_circle": "⭕ Кружочек",
+    "broadcast_btn_confirm": "✅ Отправить всем",
+    "broadcast_btn_cancel": "❌ Отмена",
+    "broadcast_confirm_normal": "🎬 Отправить всем как обычное видео?",
+    "broadcast_confirm_circle": "⭕ Отправить всем как кружочек?",
+    "broadcast_preparing": "⏳ Подготавливаю видео…",
+    "broadcast_cancelled": "✅ Рассылка отменена.",
+    "broadcast_draft_expired": "⚠️ Кнопки устарели. Отправьте видео заново.",
+    "broadcast_prepare_failed": "❌ Не удалось подготовить выбранный формат видео.",
+    "broadcast_already_started": "⚠️ Эта рассылка уже отправлена или выполняется.",
+    "btn_top_music": "🎧 Найти музыку 🇺🇿",
+    "top_music_header": "🔥 <b>Топ-10 Узбекистана</b>",
+    "top_music_source": "Источник: <a href=\"{url}\">Apple Music — Топ песен Узбекистана</a>",
+    "top_music_unavailable": (
+        "⚠️ Список Топ-10 пока не готов. Попробуйте ещё раз немного позже."
+    ),
     # Feature D — links
     "fetching": "🔎 Получаю информацию...",
     "choose_quality": "🎬 Выберите качество:",

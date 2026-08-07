@@ -40,12 +40,13 @@ from bot.handlers import (
     round as round_handler,
     start,
     text_search,
+    top_music,
     url_download,
 )
 from bot.middlewares.i18n import I18nMiddleware
 
 FAKE_TOKEN = "123456:FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE"
-ALL_ROUTERS = (broadcast.router, round_handler.router, start.router, url_download.router,
+ALL_ROUTERS = (broadcast.router, top_music.router, round_handler.router, start.router, url_download.router,
                media_recognize.router, text_search.router, results.router)
 
 
@@ -83,23 +84,34 @@ async def bot(cap):
         counter["n"] += 1
         n = counter["n"]
         name = type(method).__name__
+        response_chat_id = getattr(method, "chat_id", 1)
+        if not isinstance(response_chat_id, int):
+            response_chat_id = 1
         if name in ("AnswerCallbackQuery", "DeleteMessage"):
             return True
         if name == "CopyMessage":
             return MessageId(message_id=n)
         if name == "SendAudio":
-            msg = Message(message_id=n, date=_now(), chat=Chat(id=1, type="private"),
+            msg = Message(message_id=n, date=_now(), chat=Chat(id=response_chat_id, type="private"),
                           audio=Audio(file_id=f"AUDIO_{n}", file_unique_id=f"u{n}", duration=1))
         elif name == "SendVideo":
-            msg = Message(message_id=n, date=_now(), chat=Chat(id=1, type="private"),
+            msg = Message(message_id=n, date=_now(), chat=Chat(id=response_chat_id, type="private"),
                           video=Video(file_id=f"VIDEO_{n}", file_unique_id=f"u{n}",
                                       width=1, height=1, duration=1))
+        elif name == "SendVideoNote":
+            msg = Message(
+                message_id=n, date=_now(), chat=Chat(id=response_chat_id, type="private"),
+                video_note=VideoNote(
+                    file_id=f"NOTE_{n}", file_unique_id=f"nu{n}",
+                    length=480, duration=1,
+                ),
+            )
         elif name == "SendPhoto":
-            msg = Message(message_id=n, date=_now(), chat=Chat(id=1, type="private"),
+            msg = Message(message_id=n, date=_now(), chat=Chat(id=response_chat_id, type="private"),
                           photo=[PhotoSize(file_id=f"PHOTO_{n}", file_unique_id=f"u{n}",
                                            width=1, height=1)])
         else:
-            msg = Message(message_id=n, date=_now(), chat=Chat(id=1, type="private"),
+            msg = Message(message_id=n, date=_now(), chat=Chat(id=response_chat_id, type="private"),
                           text=getattr(method, "text", None) or getattr(method, "caption", None))
         return msg.as_(bot_)
 
@@ -169,11 +181,17 @@ def text_update(text, uid=1, lang="en", user_id=100, chat_id=100, chat_type="pri
     ))
 
 
-def callback_update(data, uid=1, lang="en", user_id=100, chat_id=100):
+def callback_update(
+    data, uid=1, lang="en", user_id=100, chat_id=100,
+    message_id=None,
+):
     return Update(update_id=uid, callback_query=CallbackQuery(
         id=str(uid), chat_instance="ci", data=data,
         from_user=User(id=user_id, is_bot=False, first_name="T", language_code=lang),
-        message=Message(message_id=uid + 5000, date=_now(), chat=Chat(id=chat_id, type="private")),
+        message=Message(
+            message_id=message_id if message_id is not None else uid + 5000,
+            date=_now(), chat=Chat(id=chat_id, type="private"),
+        ),
     ))
 
 

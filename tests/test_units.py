@@ -1,6 +1,7 @@
 """Unit tests for pure helpers — no bot, no network."""
 import asyncio
 import os
+import time
 import sqlite3
 import stat
 import subprocess
@@ -38,6 +39,8 @@ def test_config_validates_and_uses_default_locale(monkeypatch):
     monkeypatch.setenv("SEARCH_CACHE_SECONDS", "0")
     monkeypatch.setenv("ADMIN_USER_ID", "7645204689")
     monkeypatch.setenv("BROADCAST_RATE_PER_SECOND", "15")
+    monkeypatch.setenv("TOP_MUSIC_REFRESH_HOURS", "72")
+    monkeypatch.setenv("TOP_MUSIC_RETRY_MINUTES", "45")
     monkeypatch.setenv("PRIVACY_POLICY_URL", "https://example.com/privacy")
     monkeypatch.setenv("DROP_PENDING_UPDATES", "true")
     config = load_config()
@@ -54,6 +57,8 @@ def test_config_validates_and_uses_default_locale(monkeypatch):
     assert config.search_cache_seconds == 0
     assert config.admin_user_id == 7645204689
     assert config.broadcast_rate_per_second == 15
+    assert config.top_music_refresh_hours == 72
+    assert config.top_music_retry_minutes == 45
     assert config.privacy_policy_url == "https://example.com/privacy"
     assert config.drop_pending_updates is True
 
@@ -102,6 +107,14 @@ def test_config_rejects_excessive_broadcast_rate(monkeypatch):
     monkeypatch.setenv("BOT_TOKEN", "test-token")
     monkeypatch.setenv("BROADCAST_RATE_PER_SECOND", "26")
     with pytest.raises(RuntimeError, match="BROADCAST_RATE_PER_SECOND"):
+        load_config()
+
+
+def test_config_rejects_top_music_retry_not_shorter_than_refresh(monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TOP_MUSIC_REFRESH_HOURS", "1")
+    monkeypatch.setenv("TOP_MUSIC_RETRY_MINUTES", "60")
+    with pytest.raises(RuntimeError, match="TOP_MUSIC_RETRY_MINUTES"):
         load_config()
 
 
@@ -612,6 +625,8 @@ def test_stale_runtime_cleanup_is_narrow_and_age_bounded(tmp_path):
     runtime_temp.mkdir()
     stale_job = downloads / ".musiqa_job_audio_old"
     stale_job.mkdir()
+    stale_broadcast = downloads / ".musiqa_broadcast_old"
+    stale_broadcast.mkdir()
     stale_output = downloads / "audio_012345abcdef.mp3"
     stale_output.write_bytes(b"old")
     unrelated = downloads / "keep-me.mp3"
@@ -621,14 +636,17 @@ def test_stale_runtime_cleanup_is_narrow_and_age_bounded(tmp_path):
     stale_cookie = runtime_temp / "musiqa_yt_cookies_old.txt"
     stale_cookie.write_text("secret", encoding="utf-8")
     old_time = time.time() - 120
-    for path in (stale_job, stale_output, unrelated, stale_cookie):
+    for path in (
+        stale_job, stale_broadcast, stale_output, unrelated, stale_cookie,
+    ):
         os.utime(path, (old_time, old_time))
 
     removed = downloader.cleanup_stale_runtime_files(
         str(downloads), max_age_seconds=60, temp_dir=str(runtime_temp)
     )
-    assert removed == 3
-    assert not stale_job.exists() and not stale_output.exists()
+    assert removed == 4
+    assert not stale_job.exists() and not stale_broadcast.exists()
+    assert not stale_output.exists()
     assert not stale_cookie.exists()
     assert unrelated.exists() and recent_job.exists()
 
@@ -924,6 +942,34 @@ async def test_storage_tracks_reactivates_and_pages_broadcast_users():
     await s.close()
 
 
+async def test_storage_broadcast_draft_transitions_are_atomic_and_bound():
+    s = Storage(":memory:")
+    await s.init()
+    await s.create_broadcast_draft(
+        "draft-token", 7, 7, 100, {"source_kind": "video"},
+        time.time() + 60,
+    )
+
+    draft = await s.get_broadcast_draft("draft-token")
+    assert draft is not None
+    assert draft["status"] == "choosing"
+    assert draft["payload"] == {"source_kind": "video"}
+    assert await s.transition_broadcast_draft(
+        "draft-token", 8, 100, "choosing", "preparing"
+    ) is False
+
+    results = await asyncio.gather(*(
+        s.transition_broadcast_draft(
+            "draft-token", 7, 100, "choosing", "preparing",
+            payload={"source_kind": "video", "selected": "video_note"},
+        )
+        for _ in range(2)
+    ))
+    assert sorted(results) == [False, True]
+    assert (await s.get_broadcast_draft("draft-token"))["status"] == "preparing"
+    await s.close()
+
+
 async def test_storage_migrates_legacy_users_and_backfills_session_owner(tmp_path):
     path = tmp_path / "legacy.db"
     connection = sqlite3.connect(path)
@@ -985,16 +1031,21 @@ async def test_storage_deletes_only_data_owned_by_requesting_user():
     await s.save_session("two", {"owner_user_id": 2, "url": "https://example.com/2"})
     await s.set_recognition("r1", "One", "Artist", owner_user_id=1)
     await s.set_recognition("r2", "Two", "Artist", owner_user_id=2)
+    await s.create_broadcast_draft(
+        "owned-draft", 1, 1, 10, {"source_kind": "video"},
+        time.time() + 60,
+    )
 
     removed = await s.delete_user_data(1)
 
-    assert removed == 3
+    assert removed == 4
     assert await s.get_locale(1) is None
     assert await s.get_locale(2) == "ru"
     assert await s.get_session("one") is None
     assert await s.get_session("two") is not None
     assert await s.get_recognition("r1") is None
     assert await s.get_recognition("r2") is not None
+    assert await s.get_broadcast_draft("owned-draft") is None
     await s.close()
 
 

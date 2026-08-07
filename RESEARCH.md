@@ -282,6 +282,25 @@ python-dotenv
 
 ---
 
+## 13. Persisted Uzbekistan Top 10 (2026-08-08)
+
+- **Source:** Apple Marketing Tools' official, unauthenticated Uzbekistan Top
+  Songs JSON feed. It returned exactly ten ranked tracks in live validation.
+- **Request path:** `/top_music` and the media callback read only the last
+  complete SQLite snapshot. They never fetch Apple or search YouTube.
+- **Refresh path:** every 48 hours a retained background task validates ten
+  unique Apple IDs, reuses existing resolutions, resolves new tracks through
+  the bounded YouTube search worker, and atomically swaps the complete JSON
+  snapshot. Partial/error results keep the last-good snapshot.
+- **Announcements:** only a changed ordered-ID fingerprint queues a durable,
+  keyset-checkpointed fan-out. A Railway restart resumes from the stored cursor;
+  at-least-once delivery can duplicate at most the last uncheckpointed send.
+- **Attribution:** show rank/title/artist and link to Apple Music's Uzbekistan
+  chart. Artwork and previews are deliberately not republished.
+
+Primary references: [Apple Marketing Resources & Tools](https://performance-partners.apple.com/tools)
+and [Telegram inline keyboards](https://core.telegram.org/bots/features#inline-keyboards).
+
 ### Current next step
 Deploy the tested Docker image, configure Railway secrets directly, and run a
 small production-origin canary. Never share the BotFather token, cookies or proxy

@@ -17,8 +17,10 @@ the bot processes any user media.
 | `BOT_TOKEN` | ✅ | your token from @BotFather |
 | `DB_PATH` | recommended | `/data/musiqa.db` (see Volume below) |
 | `DEFAULT_LOCALE` | optional | `uz` |
-| `ADMIN_USER_ID` | recommended | `7645204689`; every private message from this user is broadcast |
+| `ADMIN_USER_ID` | recommended | `7645204689`; video/circle requires confirmation, other copyable private messages broadcast immediately |
 | `BROADCAST_RATE_PER_SECOND` | optional | `20`; do not exceed the validated maximum of `25` |
+| `TOP_MUSIC_REFRESH_HOURS` | optional | `48`; refresh the persisted Uzbekistan Top 10 off-path |
+| `TOP_MUSIC_RETRY_MINUTES` | optional | `30`; initial bounded retry after a chart/provider failure |
 | `MAX_FILE_MB` | optional | `50` |
 | `MAX_INPUT_MB` | optional | `20` (standard Bot API incoming-file limit) |
 | `PRIVACY_POLICY_URL` | required for public launch | operator-specific HTTPS policy shown by `/privacy`; configure in BotFather too |
@@ -44,6 +46,27 @@ DB resets each deploy → language prefs, the `file_id` cache, and button sessio
 2. Set `DB_PATH=/data/musiqa.db`.
 
 That's it — the app writes its DB there and it persists.
+
+The same database stores the last complete Top 10, the two-day refresh clock,
+pending automatic-announcement cursor, admin video confirmation drafts, and
+the cursor for every administrator announcement. Without the volume,
+`/top_music` must be rebuilt after every deployment and partially delivered
+announcements cannot resume.
+
+### Admin video announcements and Top 10
+
+When `ADMIN_USER_ID` sends a private normal video or circle, the bot does not
+send it immediately. Choose **normal video** or **circle**, then press the
+confirmation button. Cross-format conversion downloads at most
+`MAX_INPUT_MB`; same-format Telegram copies do not need that download. Every
+delivered video gets one callback button that opens the already stored Top 10.
+
+The Top 10 source is Apple’s official unauthenticated Uzbekistan Top Songs RSS
+feed. Refresh/search work runs in the background; `/top_music` and media-button
+clicks perform no provider request. Only a complete ten-track snapshot replaces
+the previous one, and an unchanged chart is not broadcast again. Keep one
+Railway replica and retain `overlapSeconds=0` so only one scheduler owns the
+SQLite state and Telegram polling.
 
 ## 4. ⚠️ Fix Railway's YouTube bot-check
 

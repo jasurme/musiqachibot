@@ -87,14 +87,6 @@ def _fake_dl(config, counter):
             id="text",
         ),
         pytest.param(
-            lambda: video_update(user_id=ADMIN_ID, chat_id=ADMIN_ID),
-            id="video",
-        ),
-        pytest.param(
-            lambda: video_note_update(user_id=ADMIN_ID, chat_id=ADMIN_ID),
-            id="video-note",
-        ),
-        pytest.param(
             lambda: document_update(user_id=ADMIN_ID, chat_id=ADMIN_ID),
             id="document",
         ),
@@ -120,6 +112,286 @@ async def test_admin_private_content_is_copied_to_every_active_user(
     assert cap.by("ForwardMessage") == []
     summary = cap.last("SendMessage")
     assert "Sent: 2" in summary.text and "Failed: 0" in summary.text
+
+
+def _broadcast_action(markup, action: str) -> str:
+    suffix = f":{action}"
+    return next(
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data and button.callback_data.endswith(suffix)
+    )
+
+
+def _captured_message_id(cap, method) -> int:
+    """The fake Telegram session assigns the one-based request sequence ID."""
+    return next(
+        index for index, captured in enumerate(cap.methods, start=1)
+        if captured is method
+    )
+
+
+async def _stage_admin_video(dp, bot, cap, *, circle_source: bool = False):
+    update = (
+        video_note_update(user_id=ADMIN_ID, chat_id=ADMIN_ID)
+        if circle_source
+        else video_update(user_id=ADMIN_ID, chat_id=ADMIN_ID)
+    )
+    await dp.feed_update(bot, update)
+    prompt = cap.last("SendMessage")
+    assert prompt is not None and "How should" in prompt.text
+    assert cap.by("CopyMessage") == []
+    return prompt, _captured_message_id(cap, prompt)
+
+
+async def test_admin_video_requires_format_and_confirmation_before_same_type_copy(
+    dp, bot, cap, storage, monkeypatch,
+):
+    for user_id in (101, 202, ADMIN_ID):
+        await storage.touch_private_user(user_id)
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(broadcast.asyncio, "sleep", no_wait)
+    prompt, control_message_id = await _stage_admin_video(dp, bot, cap)
+    normal = _broadcast_action(prompt.reply_markup, "normal")
+
+    await dp.feed_update(
+        bot,
+        callback_update(
+            normal, uid=2, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+            message_id=control_message_id,
+        ),
+    )
+    confirmation = cap.last("EditMessageText")
+    assert "normal video" in confirmation.text
+    confirm = normal.rsplit(":", 1)[0] + ":confirm"
+
+    await dp.feed_update(
+        bot,
+        callback_update(
+            confirm, uid=3, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+            message_id=control_message_id,
+        ),
+    )
+
+    copies = cap.by("CopyMessage")
+    assert [method.chat_id for method in copies] == [101, 202]
+    assert all(method.from_chat_id == ADMIN_ID for method in copies)
+    assert all(method.message_id == 1 for method in copies)
+    for method in copies:
+        buttons = [
+            button for row in method.reply_markup.inline_keyboard for button in row
+        ]
+        assert len(buttons) == 1
+        assert buttons[0].callback_data == "top_music"
+
+    # A replayed Confirm is no longer in awaiting_confirmation and must not
+    # create a second campaign.
+    await dp.feed_update(
+        bot,
+        callback_update(
+            confirm, uid=4, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+            message_id=control_message_id,
+        ),
+    )
+    assert len(cap.by("CopyMessage")) == 2
+
+
+async def test_admin_video_cross_conversion_uploads_preview_once_then_reuses_file_id(
+    dp, bot, cap, storage, config, monkeypatch,
+):
+    for user_id in (101, 202, ADMIN_ID):
+        await storage.touch_private_user(user_id)
+    calls = {"download": 0, "convert": 0}
+
+    async def fake_download(file, destination, **kwargs):
+        calls["download"] += 1
+        with open(destination, "wb") as output:
+            output.write(b"source-video")
+
+    async def fake_note(src_path, out_dir, **kwargs):
+        calls["convert"] += 1
+        path = os.path.join(out_dir, "prepared.note.mp4")
+        with open(path, "wb") as output:
+            output.write(b"prepared-circle")
+        return path
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(bot, "download", fake_download)
+    monkeypatch.setattr("bot.services.video.make_video_note", fake_note)
+    monkeypatch.setattr(broadcast.asyncio, "sleep", no_wait)
+
+    prompt, control_message_id = await _stage_admin_video(dp, bot, cap)
+    circle = _broadcast_action(prompt.reply_markup, "circle")
+    await dp.feed_update(
+        bot,
+        callback_update(
+            circle, uid=10, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+            message_id=control_message_id,
+        ),
+    )
+
+    previews = [
+        method for method in cap.by("SendVideoNote")
+        if method.chat_id == ADMIN_ID
+    ]
+    assert len(previews) == 1
+    preview = previews[0]
+    preview_message_id = _captured_message_id(cap, preview)
+    assert _broadcast_action(preview.reply_markup, "confirm")
+    assert calls == {"download": 1, "convert": 1}
+
+    confirm = circle.rsplit(":", 1)[0] + ":confirm"
+    await dp.feed_update(
+        bot,
+        callback_update(
+            confirm, uid=11, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+            message_id=preview_message_id,
+        ),
+    )
+
+    deliveries = [
+        method for method in cap.by("SendVideoNote")
+        if method.chat_id in {101, 202}
+    ]
+    assert [method.chat_id for method in deliveries] == [101, 202]
+    assert len({method.video_note for method in deliveries}) == 1
+    assert all(isinstance(method.video_note, str) for method in deliveries)
+    assert all(
+        method.reply_markup.inline_keyboard[0][0].callback_data == "top_music"
+        for method in deliveries
+    )
+    assert calls == {"download": 1, "convert": 1}
+
+
+async def test_admin_circle_can_be_reuploaded_once_as_normal_video(
+    dp, bot, cap, storage, monkeypatch,
+):
+    for user_id in (101, ADMIN_ID):
+        await storage.touch_private_user(user_id)
+    downloads = 0
+
+    async def fake_download(file, destination, **kwargs):
+        nonlocal downloads
+        downloads += 1
+        with open(destination, "wb") as output:
+            output.write(b"square-mp4")
+
+    async def forbidden_conversion(*args, **kwargs):
+        raise AssertionError("circle-to-normal must not run ffmpeg")
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(bot, "download", fake_download)
+    monkeypatch.setattr("bot.services.video.make_video_note", forbidden_conversion)
+    monkeypatch.setattr(broadcast.asyncio, "sleep", no_wait)
+
+    prompt, control_message_id = await _stage_admin_video(
+        dp, bot, cap, circle_source=True,
+    )
+    normal = _broadcast_action(prompt.reply_markup, "normal")
+    await dp.feed_update(
+        bot,
+        callback_update(
+            normal, uid=15, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+            message_id=control_message_id,
+        ),
+    )
+
+    previews = [
+        method for method in cap.by("SendVideo")
+        if method.chat_id == ADMIN_ID
+    ]
+    assert len(previews) == 1
+    preview = previews[0]
+    preview_message_id = _captured_message_id(cap, preview)
+    assert _broadcast_action(preview.reply_markup, "confirm")
+    assert downloads == 1
+
+    confirm = normal.rsplit(":", 1)[0] + ":confirm"
+    await dp.feed_update(
+        bot,
+        callback_update(
+            confirm, uid=16, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+            message_id=preview_message_id,
+        ),
+    )
+
+    deliveries = [
+        method for method in cap.by("SendVideo") if method.chat_id == 101
+    ]
+    assert len(deliveries) == 1
+    assert isinstance(deliveries[0].video, str)
+    assert deliveries[0].reply_markup.inline_keyboard[0][0].callback_data == "top_music"
+    assert downloads == 1
+
+
+async def test_admin_media_draft_can_be_cancelled_without_delivery(
+    dp, bot, cap, storage,
+):
+    await storage.touch_private_user(101)
+    prompt, control_message_id = await _stage_admin_video(
+        dp, bot, cap, circle_source=True,
+    )
+    cancel = _broadcast_action(prompt.reply_markup, "cancel")
+
+    await dp.feed_update(
+        bot,
+        callback_update(
+            cancel, uid=20, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+            message_id=control_message_id,
+        ),
+    )
+
+    assert cap.by("CopyMessage") == []
+    assert len(cap.by("DeleteMessage")) == 1
+    assert "cancelled" in cap.last("SendMessage").text.lower()
+
+
+async def test_two_admin_confirm_callbacks_have_one_atomic_winner(
+    dp, bot, cap, storage, monkeypatch,
+):
+    await storage.touch_private_user(101)
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(broadcast.asyncio, "sleep", no_wait)
+    prompt, control_message_id = await _stage_admin_video(dp, bot, cap)
+    normal = _broadcast_action(prompt.reply_markup, "normal")
+    await dp.feed_update(
+        bot,
+        callback_update(
+            normal, uid=30, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+            message_id=control_message_id,
+        ),
+    )
+    confirm = normal.rsplit(":", 1)[0] + ":confirm"
+
+    await asyncio.gather(
+        dp.feed_update(
+            bot,
+            callback_update(
+                confirm, uid=31, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+                message_id=control_message_id,
+            ),
+        ),
+        dp.feed_update(
+            bot,
+            callback_update(
+                confirm, uid=32, user_id=ADMIN_ID, chat_id=ADMIN_ID,
+                message_id=control_message_id,
+            ),
+        ),
+    )
+
+    assert [method.chat_id for method in cap.by("CopyMessage")] == [101]
 
 
 async def test_admin_broadcast_preempts_normal_link_and_search_handlers(
@@ -257,7 +529,7 @@ async def test_broadcast_voice_privacy_error_does_not_deactivate_user(
     monkeypatch.setattr(broadcast.asyncio, "sleep", no_wait)
     await dp.feed_update(
         bot,
-        video_note_update(user_id=ADMIN_ID, chat_id=ADMIN_ID),
+        voice_update(user_id=ADMIN_ID, chat_id=ADMIN_ID),
     )
 
     assert await storage.get_active_user_ids() == [101, ADMIN_ID]
