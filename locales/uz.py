@@ -20,23 +20,6 @@ STRINGS = {
     "cmd_moods": "Kayfiyat musiqalari",
     "cmd_total_users": "Foydalanuvchilar soni",
     "cmd_lang": "Tilni oʻzgartirish",
-    "cmd_privacy": "Maxfiylik maʼlumoti",
-    "cmd_delete_my_data": "Saqlangan maʼlumotimni oʻchirish",
-    "btn_privacy_policy": "Toʻliq maxfiylik siyosati",
-    "privacy_notice": (
-        "🔐 <b>Maxfiylik</b>\n\n"
-        "Bot Telegram foydalanuvchi ID raqamingiz va tilingizni oʻchirilguncha, "
-        "jumladan bot eʼlonlarini yuborish uchun; "
-        "tugma/qidiruv sessiyalarini 7 kungacha; musiqa aniqlash natijalarini "
-        "30 kungacha saqlaydi. Umumiy Telegram file_id qiymatlari uzoqroq "
-        "saqlanishi mumkin. Yuklangan media va namunalar ishlovdan soʻng mahalliy "
-        "xotiradan oʻchiriladi.\n\n"
-        "Qisqa namuna yoki metadata Shazam/AudD xizmatiga; qidiruv va yuklash "
-        "soʻrovlari manba xizmatlariga; matn soʻrovi lyrics.ovh xizmatiga yuborilishi "
-        "mumkin. Railway va sozlangan proksi tarmoq trafikini qayta ishlaydi. "
-        "ID raqamingizga bogʻliq maʼlumotlarni oʻchirish uchun /delete_my_data dan foydalaning."
-    ),
-    "data_deleted": "✅ Foydalanuvchi ID raqamingizga bogʻliq maʼlumotlar oʻchirildi.",
     "total_users_report": (
         "👥 <b>Foydalanuvchilar</b>\n\n"
         "Jami: {total}\nFaol: {active}\nFaol emas: {inactive}"

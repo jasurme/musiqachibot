@@ -37,7 +37,6 @@ class Config:
     heavy_job_concurrency: int = 3
     search_max_seconds: int = 1200
     search_cache_seconds: int = 3600
-    privacy_policy_url: str | None = None
     # Messages sent to the bot by this private-chat user are copied to every
     # active private user. Keep the default requested by the bot operator while
     # allowing an environment override for future ownership changes.
@@ -178,7 +177,6 @@ def load_config() -> Config:
         heavy_job_concurrency=heavy_job_concurrency,
         search_max_seconds=search_max_seconds,
         search_cache_seconds=search_cache_seconds,
-        privacy_policy_url=_clean(os.getenv("PRIVACY_POLICY_URL")),
         admin_user_id=admin_user_id,
         broadcast_rate_per_second=broadcast_rate_per_second,
         top_music_refresh_hours=top_music_refresh_hours,

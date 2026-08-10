@@ -41,7 +41,6 @@ def test_config_validates_and_uses_default_locale(monkeypatch):
     monkeypatch.setenv("BROADCAST_RATE_PER_SECOND", "15")
     monkeypatch.setenv("TOP_MUSIC_REFRESH_HOURS", "72")
     monkeypatch.setenv("TOP_MUSIC_RETRY_MINUTES", "45")
-    monkeypatch.setenv("PRIVACY_POLICY_URL", "https://example.com/privacy")
     monkeypatch.setenv("DROP_PENDING_UPDATES", "true")
     config = load_config()
     assert config.default_locale == "ru"
@@ -59,7 +58,6 @@ def test_config_validates_and_uses_default_locale(monkeypatch):
     assert config.broadcast_rate_per_second == 15
     assert config.top_music_refresh_hours == 72
     assert config.top_music_retry_minutes == 45
-    assert config.privacy_policy_url == "https://example.com/privacy"
     assert config.drop_pending_updates is True
 
 

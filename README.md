@@ -52,7 +52,7 @@ challenge solver (`brew install deno` on macOS). The Docker image includes both.
 - [x] **file_id/search/recognition caches** + bounded global/per-user concurrent jobs
 - [x] Killable, concurrency-limited provider workers with byte/duration/deadline guards
 - [x] Shazamio recognition with optional **AudD fallback** (`AUDD_TOKEN`)
-- [x] Owner-bound callback sessions, 7/30-day retention, `/privacy`, and `/delete_my_data`
+- [x] Owner-bound callback sessions with bounded 7/30-day retention
 - [x] **Local Bot API server topology** — opt-in shared-volume Compose stack for incoming >20 MB or outgoing >50 MB
 
 Search and media delivery use YouTube via yt-dlp; Shazamio needs no API key.
@@ -87,8 +87,7 @@ Every announcement is persisted before its first recipient, so a Railway
 restart resumes the unsent remainder. Slash commands still run normally and
 are never broadcast. Announcements have no forward attribution and are paced at
 `BROADCAST_RATE_PER_SECOND=20`. Blocked/deactivated recipients are removed from
-later sends. `/delete_my_data` removes a user from the audience until they
-interact privately with the bot again.
+later sends.
 
 The media button and `/top_music` read only a complete SQLite snapshot, so no
 chart lookup happens on the user request path. A background task checks Apple’s
@@ -103,8 +102,11 @@ source details are not shown in the Telegram response.
 The same off-request-path design powers `/new_music`, `/rising`,
 `/discoveries`, and `/moods`. New Music and Discoveries always store five
 resolved tracks; Rising uses retained ranking history and notifies only when at
-least three songs have meaningfully moved. Night, road, workout, calm, and
-weekend each keep exactly ten last-good tracks and refresh weekly. Proactive
+least three songs have meaningfully moved; while that history matures, its
+command reads a silent stored current-chart bootstrap instead of staying empty.
+Night, road, workout, calm, and weekend each keep exactly ten last-good tracks
+and refresh weekly. Mood search pages fail independently and diversity rules
+relax before a collection is allowed to remain empty. Proactive
 messages are limited to Monday Discoveries, conditional Wednesday Rising, and
 Friday New Music in Asia/Tashkent. Every active user receives these campaigns;
 the interactive commands remain available at any time. Campaign payloads,

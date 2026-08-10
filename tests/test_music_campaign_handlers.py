@@ -231,10 +231,11 @@ async def test_bot_command_menu_exposes_every_campaign_in_all_languages():
     for commands, _language, _scope in public:
         names = {command.command for command in commands}
         assert regular <= names
-        assert "notifications" not in names
-        assert "total_users" not in names
+        assert not {
+            "notifications", "privacy", "delete_my_data", "total_users",
+        } & names
     for commands, _language, scope in admin:
         names = {command.command for command in commands}
         assert regular | {"total_users"} <= names
-        assert "notifications" not in names
+        assert not {"notifications", "privacy", "delete_my_data"} & names
         assert scope.chat_id == 7645204689

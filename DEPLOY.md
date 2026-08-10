@@ -23,7 +23,6 @@ the bot processes any user media.
 | `TOP_MUSIC_RETRY_MINUTES` | optional | `30`; initial bounded retry after a chart/provider failure |
 | `MAX_FILE_MB` | optional | `50` |
 | `MAX_INPUT_MB` | optional | `20` (standard Bot API incoming-file limit) |
-| `PRIVACY_POLICY_URL` | required for public launch | operator-specific HTTPS policy shown by `/privacy`; configure in BotFather too |
 | `YTDLP_COOKIES_CONTENT` | conditional | fresh Netscape cookie export when YouTube requires login/CAPTCHA state; see §4 |
 | `YTDLP_PROXY` | sometimes needed | authorized stable proxy whose egress is not blocked |
 | `INSTAGRAM_PROXY` | rarely needed | Instagram-only authorized stable proxy |
@@ -73,8 +72,10 @@ once in their Asia/Tashkent weekly slots (Monday, conditional Wednesday, and
 Friday) to every active user and resume from SQLite after a restart. Mood lists
 refresh weekly but are opened on demand, preventing five extra broadcasts.
 The first reliable Rising comparison needs about one week of retained chart
-history. Keep one Railway replica and retain `overlapSeconds=0` so one scheduler
-owns SQLite campaign leases and Telegram polling.
+history. Until then, `/rising` reads a provisional stored chart snapshot; only
+measured six-day movers qualify for the Wednesday fan-out. Keep one Railway
+replica and retain `overlapSeconds=0` so one scheduler owns SQLite campaign
+leases and Telegram polling.
 
 ## 4. ⚠️ Fix Railway's YouTube bot-check
 

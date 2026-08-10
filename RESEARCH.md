@@ -310,10 +310,13 @@ and [Telegram inline keyboards](https://core.telegram.org/bots/features#inline-k
 - **Rising:** daily UZ ranking history supplies a six-to-seven-day comparison.
   At least three meaningful movers are required before the Wednesday campaign;
   a first deployment therefore needs about one week to establish its baseline.
+  A provisional current-chart snapshot keeps `/rising` usable during that
+  period but is never eligible for proactive delivery.
 - **Moods:** night, road, workout, calm, and weekend are bounded YouTube search
   builds. Each collection publishes only after ten unique, duration-checked
-  tracks resolve; one failed mood keeps its own last-good snapshot without
-  invalidating the other four.
+  tracks resolve. Independent query failures and soft cross-mood diversity
+  cannot starve a later collection; one failed mood still keeps its own
+  last-good snapshot without invalidating the other four.
 - **Cadence:** Monday Discoveries, conditional Wednesday Rising, and Friday New
   Music use Asia/Tashkent time. Mood libraries refresh weekly and are promoted
   from those messages rather than creating five additional pushes.

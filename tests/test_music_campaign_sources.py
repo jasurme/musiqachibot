@@ -24,6 +24,7 @@ from bot.services.music_campaigns import (
     refresh_mood_collections_once,
     refresh_mood_collection_once,
     select_new_music_candidates,
+    select_rising_bootstrap_candidates,
     select_rising_candidates,
 )
 from bot.services.search import SearchItem
@@ -122,6 +123,16 @@ def test_rising_requires_real_movers_then_adds_non_top_ten_fillers():
     assert all(item["rank"] > 10 for item in filled if item.get("momentum_filler"))
 
 
+def test_rising_bootstrap_prefers_diverse_tracks_outside_top_ten():
+    candidates = select_rising_bootstrap_candidates(
+        _chart("bootstrap", count=30), candidate_limit=5,
+    )
+
+    assert [item["rank"] for item in candidates] == [11, 12, 13, 14, 15]
+    assert len({item["source_id"] for item in candidates}) == 5
+    assert all(item["momentum_bootstrap"] for item in candidates)
+
+
 async def test_mood_search_is_bounded_filters_mixes_and_returns_ten_unique():
     calls: list[tuple[str, int]] = []
 
@@ -149,6 +160,60 @@ async def test_mood_search_is_bounded_filters_mixes_and_returns_ten_unique():
     assert all(limit == 20 for _, limit in calls)
     assert len(items) == len({item["video_id"] for item in items}) == 10
     assert all("Playlist" not in item["title"] for item in items)
+
+
+async def test_one_failed_mood_query_uses_the_other_two_pages():
+    calls = 0
+
+    async def searcher(query: str, limit: int) -> list[SearchItem]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("one search page failed")
+        return [
+            SearchItem(
+                video_id=f"partial{calls:02d}{index:02d}",
+                title=f"Artist {calls}-{index} - Song {calls}-{index}",
+                duration=180,
+                uploader=f"Channel {calls}-{index}",
+            )
+            for index in range(limit)
+        ]
+
+    items = await build_mood_collection("workout", searcher=searcher)
+
+    assert calls == 3
+    assert len(items) == len({item["video_id"] for item in items}) == 10
+
+
+async def test_cross_mood_overlap_never_leaves_later_collections_empty(tmp_path):
+    db = Storage(str(tmp_path / "overlapping-moods.db"))
+    await db.init()
+    shared = [
+        SearchItem(
+            video_id=f"sharedvideo{index:02d}",
+            title=f"Artist {index} - Song {index}",
+            duration=180,
+            uploader=f"Channel {index}",
+        )
+        for index in range(20)
+    ]
+
+    async def searcher(query: str, limit: int) -> list[SearchItem]:
+        return list(shared)
+
+    outcomes = await refresh_mood_collections_once(
+        db, now=100, searcher=searcher,
+    )
+
+    assert all(
+        outcomes[slug]["status"] == "published"
+        for slug in ("night", "road", "workout", "calm", "weekend")
+    )
+    for slug in ("night", "road", "workout", "calm", "weekend"):
+        state = await db.get_music_collection_state(f"mood:{slug}")
+        assert len(state["items"]) == 10
+    await db.close()
 
 
 def test_tashkent_slot_and_dedupe_are_stable_inside_the_hour():
@@ -198,7 +263,7 @@ async def test_failed_empty_mood_respects_persisted_backoff(tmp_path):
         retry_base_seconds=1800,
     )
     assert failed["status"] == "failed"
-    assert calls == 1
+    assert calls == 3
     assert (await db.get_music_collection_state("mood:night"))[
         "next_refresh_at"
     ] == 1900
@@ -214,6 +279,88 @@ async def test_failed_empty_mood_respects_persisted_backoff(tmp_path):
         retry_base_seconds=1800,
     )
     assert skipped == {"status": "not_due"}
+
+    good_page = 0
+
+    async def repaired(query: str, limit: int) -> list[SearchItem]:
+        nonlocal good_page
+        good_page += 1
+        return [
+            SearchItem(
+                video_id=f"repaired{good_page:02d}{index:02d}",
+                title=f"Artist {good_page}-{index} - Song {good_page}-{index}",
+                duration=180,
+                uploader=f"Channel {good_page}-{index}",
+            )
+            for index in range(limit)
+        ]
+
+    forced = await refresh_mood_collection_once(
+        db,
+        "night",
+        now=200,
+        searcher=repaired,
+        retry_base_seconds=1800,
+        force_empty=True,
+    )
+    assert forced["status"] == "published"
+    repaired_state = await db.get_music_collection_state("mood:night")
+    assert len(repaired_state["items"]) == 10
+    assert repaired_state["failure_count"] == 0
+    await db.close()
+
+
+async def test_failed_forced_repair_restores_normal_backoff(tmp_path):
+    db = Storage(str(tmp_path / "forced-mood-backoff.db"))
+    await db.init()
+    calls = 0
+
+    async def unavailable(query: str, limit: int):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("provider unavailable")
+
+    first = await refresh_mood_collection_once(
+        db, "weekend", now=100, searcher=unavailable,
+        retry_base_seconds=1800,
+    )
+    assert first["status"] == "failed"
+    forced = await refresh_mood_collection_once(
+        db, "weekend", now=200, searcher=unavailable,
+        retry_base_seconds=1800, force_empty=True,
+    )
+    assert forced["status"] == "failed"
+    assert calls == 6
+    assert (await db.get_music_collection_state("mood:weekend"))[
+        "next_refresh_at"
+    ] == 3800
+
+    async def must_not_run(query: str, limit: int):
+        raise AssertionError("normal retry must honor the new backoff")
+
+    assert await refresh_mood_collection_once(
+        db, "weekend", now=201, searcher=must_not_run,
+    ) == {"status": "not_due"}
+    await db.close()
+
+
+async def test_active_empty_lease_keeps_startup_repair_pending(tmp_path):
+    db = Storage(str(tmp_path / "mood-lease.db"))
+    await db.init()
+    await db.ensure_music_collection("mood:workout", 10)
+    token = await db.claim_music_collection_refresh(
+        "mood:workout", 100, force=True,
+    )
+    assert token
+
+    async def must_not_run(query: str, limit: int):
+        raise AssertionError("an active lease must prevent duplicate work")
+
+    outcome = await refresh_mood_collection_once(
+        db, "workout", now=101, searcher=must_not_run, force_empty=True,
+    )
+    assert outcome == {"status": "not_due", "repair_pending": True}
+    await db.release_music_collection_refresh("mood:workout", token)
     await db.close()
 
 
@@ -253,9 +400,13 @@ async def test_initial_snapshot_is_silent_then_unchanged_slot_is_enqueued(tmp_pa
         db, now=saturday, fetcher=fetcher, searcher=searcher,
     )
     assert initial["collections"][CAMPAIGN_NEW_MUSIC]["status"] == "published"
-    assert initial["collections"][CAMPAIGN_RISING]["status"] == "baseline_pending"
+    assert initial["collections"][CAMPAIGN_RISING]["status"] == "published"
+    assert initial["collections"][CAMPAIGN_RISING]["bootstrap"] is True
     assert initial["collections"][CAMPAIGN_DISCOVERIES]["status"] == "published"
     assert len((await db.get_music_collection_state(CAMPAIGN_NEW_MUSIC))["items"]) == 5
+    rising = await db.get_music_collection_state(CAMPAIGN_RISING)
+    assert len(rising["items"]) == 5
+    assert rising["provider_state"]["rising_bootstrap"] is True
     assert await db.claim_next_music_campaign(
         now=saturday, week_key="2026-W32"
     ) is None
@@ -279,6 +430,115 @@ async def test_initial_snapshot_is_silent_then_unchanged_slot_is_enqueued(tmp_pa
     await db.close()
 
 
+async def test_forced_rising_bootstrap_is_silent_then_real_movers_replace_it(
+    tmp_path,
+):
+    db = Storage(str(tmp_path / "rising-bootstrap.db"))
+    await db.init()
+    active_charts = _stable_campaign_charts()
+
+    async def fetcher():
+        return active_charts
+
+    async def searcher(query: str, limit: int):
+        number = int(query.split("Song", 1)[1].split()[0])
+        return [
+            SearchItem(
+                video_id=f"risingvideo{number:03d}",
+                title=f"Artistapple{number} - Song {number}",
+                duration=180,
+                uploader=f"Artistapple{number}",
+            )
+        ]
+
+    first_wednesday = int(
+        datetime.fromisoformat("2026-08-12T13:00:00+00:00").timestamp()
+    )
+    # Simulate the future retry time persisted by the deployed empty Rising
+    # rule. The one-shot startup repair must bypass it immediately.
+    await db.ensure_music_collection(CAMPAIGN_RISING, 5)
+    stale_token = await db.claim_music_collection_refresh(
+        CAMPAIGN_RISING, first_wednesday - 60, force=True,
+    )
+    assert stale_token
+    assert await db.defer_music_collection_refresh(
+        CAMPAIGN_RISING,
+        stale_token,
+        next_refresh_at=first_wednesday + 24 * 60 * 60,
+    )
+
+    initial = await refresh_apple_collections_once(
+        db,
+        now=first_wednesday,
+        fetcher=fetcher,
+        searcher=searcher,
+        force_empty=True,
+    )
+    rising = initial["collections"][CAMPAIGN_RISING]
+    assert rising["status"] == "published"
+    assert rising["bootstrap"] is True
+    stored = await db.get_music_collection_state(CAMPAIGN_RISING)
+    assert len(stored["items"]) == 5
+    assert stored["provider_state"]["rising_bootstrap"] is True
+    assert stored["next_refresh_at"] == next_campaign_slot(
+        CAMPAIGN_RISING, first_wednesday + 60 * 60,
+    )
+    assert await db.claim_next_music_campaign(
+        now=first_wednesday, week_key="2026-W33",
+    ) is None
+
+    # A quiet week keeps the useful provisional list but correctly sends no
+    # Rising campaign because fewer than three movements were measured.
+    second_wednesday = int(
+        datetime.fromisoformat("2026-08-19T13:00:00+00:00").timestamp()
+    )
+    quiet = await refresh_apple_collections_once(
+        db,
+        now=second_wednesday,
+        fetcher=fetcher,
+        searcher=searcher,
+    )
+    assert quiet["collections"][CAMPAIGN_RISING]["status"] == (
+        "no_meaningful_movers"
+    )
+    retained = await db.get_music_collection_state(CAMPAIGN_RISING)
+    assert retained["items"] == stored["items"]
+    assert retained["provider_state"]["rising_bootstrap"] is True
+    assert await db.claim_next_music_campaign(
+        now=second_wednesday, week_key="2026-W34",
+    ) is None
+
+    # Once three tracks objectively move, they replace the provisional list
+    # and the real Wednesday campaign becomes eligible exactly once.
+    current = [dict(item) for item in _stable_campaign_charts()["uz"]]
+    movers = [current.pop(index) for index in (21, 20, 19)]
+    current = movers + current
+    for rank, item in enumerate(current, start=1):
+        item["rank"] = rank
+    active_charts = {"uz": current}
+    third_wednesday = int(
+        datetime.fromisoformat("2026-08-26T13:00:00+00:00").timestamp()
+    )
+    measured = await refresh_apple_collections_once(
+        db,
+        now=third_wednesday,
+        fetcher=fetcher,
+        searcher=searcher,
+    )
+    assert measured["collections"][CAMPAIGN_RISING]["status"] == "published"
+    assert measured["collections"][CAMPAIGN_RISING]["bootstrap"] is False
+    stored = await db.get_music_collection_state(CAMPAIGN_RISING)
+    assert stored["provider_state"]["rising_bootstrap"] is False
+    claimed = await db.claim_next_music_campaign(
+        now=third_wednesday, week_key="2026-W35",
+    )
+    assert claimed is not None and claimed["kind"] == CAMPAIGN_RISING
+    await db.release_music_campaign(
+        claimed["campaign_id"], claimed["runner_token"]
+    )
+    await db.close()
+
+
 async def test_one_mood_failure_does_not_block_other_four_snapshots(tmp_path):
     db = Storage(str(tmp_path / "mood-isolation.db"))
     await db.init()
@@ -287,7 +547,7 @@ async def test_one_mood_failure_does_not_block_other_four_snapshots(tmp_path):
     async def searcher(query: str, limit: int):
         nonlocal call_number
         call_number += 1
-        if "tungi" in query:
+        if query in MOOD_QUERY_TEMPLATES["night"]:
             raise RuntimeError("night source failed")
         return [
             SearchItem(

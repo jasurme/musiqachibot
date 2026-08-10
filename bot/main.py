@@ -107,11 +107,6 @@ async def _set_commands(
             ),
             BotCommand(command="moods", description=t("cmd_moods", locale)),
             BotCommand(command="lang", description=t("cmd_lang", locale)),
-            BotCommand(command="privacy", description=t("cmd_privacy", locale)),
-            BotCommand(
-                command="delete_my_data",
-                description=t("cmd_delete_my_data", locale),
-            ),
         ]
         if admin:
             values.append(

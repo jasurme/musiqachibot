@@ -111,33 +111,36 @@ _REJECT_SEARCH_TITLE = re.compile(
 )
 
 # These are discovery queries, not claims that the result itself is an
-# official upload.  Candidate validation below removes long mixes, streams,
-# karaoke, duplicate videos, and implausible durations.
+# official upload. Broad genre/activity phrases are intentional: year-scoped
+# "hits" queries frequently collapse to playlists and mixes, leaving fewer
+# than ten usable videos even when YouTube search itself is healthy. Candidate
+# validation below still removes long mixes, streams, karaoke, duplicate
+# videos, and implausible durations.
 MOOD_QUERY_TEMPLATES: dict[str, tuple[str, ...]] = {
     "night": (
-        "tungi chill musiqa qo'shiqlar official audio {year}",
-        "late night chill hits official audio {year}",
-        "ночные chill хиты official audio {year}",
+        "night drive music official audio",
+        "midnight pop official audio",
+        "dreamy pop official audio",
     ),
     "road": (
-        "yo'l uchun musiqa xitlar official audio {year}",
-        "road trip driving songs official audio {year}",
-        "музыка в машину хиты official audio {year}",
+        "road trip song official audio",
+        "driving rock official audio",
+        "summer driving song official audio",
     ),
     "workout": (
-        "sport uchun energiyali musiqa official audio {year}",
-        "workout gym hits official audio {year}",
-        "музыка для тренировки хиты official audio {year}",
+        "upbeat pop official audio",
+        "hardstyle official audio",
+        "electronic workout song official audio",
     ),
     "calm": (
-        "sokin musiqa qo'shiqlar official audio {year}",
-        "calm relaxing songs official audio {year}",
-        "спокойные песни official audio {year}",
+        "acoustic pop official audio",
+        "soft pop official audio",
+        "acoustic indie official audio",
     ),
     "weekend": (
-        "dam olish raqs xitlar official audio {year}",
-        "weekend party dance hits official audio {year}",
-        "танцевальные хиты для вечеринки official audio {year}",
+        "dance pop official audio",
+        "party dance song official audio",
+        "afro house official audio",
     ),
 }
 
@@ -525,6 +528,61 @@ def add_rising_fillers(
     return combined
 
 
+def select_rising_bootstrap_candidates(
+    current_chart: Sequence[Mapping[str, Any]],
+    *,
+    candidate_limit: int = 15,
+    recently_used: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    """Build a useful initial Rising pool while rank history accumulates.
+
+    A new installation needs roughly six days before it can prove movement.
+    Keeping the collection empty during that period makes the instant command
+    unusable, so initialization prefers strong entries just outside the Top 10
+    and falls back to the rest of the current chart. This bootstrap is never
+    proactively broadcast and is replaced by measured movers at a later slot.
+    """
+    used = {_text(value) for value in recently_used if _text(value)}
+    outside_top_ten: list[dict[str, Any]] = []
+    top_ten: list[dict[str, Any]] = []
+    for fallback_rank, source in enumerate(current_chart, start=1):
+        source_id = _text(source.get("source_id"))
+        artist = _text(source.get("artist"))
+        name = _text(source.get("name"))
+        if not source_id or not artist or not name:
+            continue
+        try:
+            rank = max(1, int(source.get("rank") or fallback_rank))
+        except (TypeError, ValueError):
+            rank = fallback_rank
+        item = dict(source)
+        item.update({
+            "rank": rank,
+            "previous_rank": None,
+            "rank_rise": None,
+            "new_entry": False,
+            "momentum_bootstrap": True,
+        })
+        (outside_top_ten if rank > 10 else top_ten).append(item)
+    ordered = sorted(outside_top_ten, key=lambda item: item["rank"])
+    ordered.extend(sorted(top_ten, key=lambda item: item["rank"]))
+
+    selected = _diverse_take(
+        ordered,
+        limit=candidate_limit,
+        excluded=used,
+        max_per_artist=1,
+    )
+    if len(selected) < candidate_limit:
+        already = {item["source_id"] for item in selected}
+        selected.extend(_diverse_take(
+            [item for item in ordered if item["source_id"] not in already],
+            limit=candidate_limit - len(selected),
+            max_per_artist=2,
+        ))
+    return selected
+
+
 def select_discovery_candidates(
     charts: Mapping[str, Sequence[Mapping[str, Any]]],
     *,
@@ -737,10 +795,32 @@ async def build_mood_collection(
     wanted = max(1, int(count))
     query_year = int(year or datetime.now(timezone.utc).year)
     query_results: list[list[SearchItem]] = []
-    for template in MOOD_QUERY_TEMPLATES[slug][:MOOD_MAX_SEARCH_CALLS]:
+    query_failures: list[Exception] = []
+    for query_index, template in enumerate(
+        MOOD_QUERY_TEMPLATES[slug][:MOOD_MAX_SEARCH_CALLS], start=1,
+    ):
         query = template.format(year=query_year)
-        results = await searcher(query, MOOD_RESULTS_PER_QUERY)
+        try:
+            results = await searcher(query, MOOD_RESULTS_PER_QUERY)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Search pages are independent. One malformed/localized result
+            # page must not discard enough good candidates from the others to
+            # leave an otherwise healthy mood unavailable.
+            query_failures.append(exc)
+            logger.warning(
+                "Mood search query failed mood=%s query=%s error=%s",
+                slug,
+                query_index,
+                type(exc).__name__,
+            )
+            query_results.append([])
+            continue
         query_results.append([item for item in results if _valid_search_item(item)])
+
+    if query_failures and len(query_failures) == len(query_results):
+        raise query_failures[0]
 
     # Round-robin preserves local/global query diversity instead of allowing
     # one result page to consume the whole collection.
@@ -757,10 +837,15 @@ async def build_mood_collection(
     seen_videos: set[str] = set()
     artist_counts: dict[str, int] = {}
 
-    def take(*, exclude_history: bool, max_per_artist: int) -> None:
+    def take(
+        *, exclude_history: bool, exclude_reserved: bool,
+        max_per_artist: int,
+    ) -> None:
         for result in ranked:
             source_id = f"youtube:{result.video_id}"
-            if result.video_id in seen_videos or source_id in reserved:
+            if result.video_id in seen_videos:
+                continue
+            if exclude_reserved and source_id in reserved:
                 continue
             if exclude_history and source_id in historical:
                 continue
@@ -774,11 +859,24 @@ async def build_mood_collection(
             if len(selected) >= wanted:
                 return
 
-    take(exclude_history=True, max_per_artist=1)
+    take(exclude_history=True, exclude_reserved=True, max_per_artist=1)
     if len(selected) < wanted:
-        take(exclude_history=True, max_per_artist=2)
+        take(exclude_history=True, exclude_reserved=True, max_per_artist=2)
     if len(selected) < wanted:
-        take(exclude_history=False, max_per_artist=2)
+        take(exclude_history=False, exclude_reserved=True, max_per_artist=2)
+    if len(selected) < wanted:
+        # Cross-mood uniqueness is a quality preference. Reusing an otherwise
+        # valid song is better than exposing a permanently empty menu option.
+        take(exclude_history=False, exclude_reserved=False, max_per_artist=2)
+    if len(selected) < wanted:
+        # Likewise, provider pages occasionally contain many releases from one
+        # official channel. Keep unique videos as the hard invariant while
+        # relaxing artist diversity only as the final availability fallback.
+        take(
+            exclude_history=False,
+            exclude_reserved=False,
+            max_per_artist=wanted,
+        )
     if len(selected) != wanted:
         raise ValueError(f"only {len(selected)} of {wanted} {slug} tracks resolved")
     return selected
@@ -901,8 +999,18 @@ async def _publish_apple_collection(
     now: int,
     searcher: Callable[[str, int], Awaitable[list[SearchItem]]],
 ) -> dict[str, Any]:
-    recent = _recent_source_ids(state)
+    stored_provider_state = state.get("provider_state")
+    has_rising_bootstrap = bool(
+        campaign_key == CAMPAIGN_RISING
+        and isinstance(stored_provider_state, Mapping)
+        and stored_provider_state.get("rising_bootstrap")
+    )
+    # Provisional ranks 11+ can become tomorrow's real movers. Do not let the
+    # bootstrap's own repeat-avoidance list hide them from the first measured
+    # six-day comparison.
+    recent = [] if has_rising_bootstrap else _recent_source_ids(state)
     source_day = datetime.fromtimestamp(now, timezone.utc).date()
+    bootstrap = False
     if campaign_key == CAMPAIGN_NEW_MUSIC:
         candidates = select_new_music_candidates(
             charts,
@@ -911,19 +1019,34 @@ async def _publish_apple_collection(
             recently_used=recent,
         )
     elif campaign_key == CAMPAIGN_RISING:
-        if not baseline_uz:
-            raise LookupError("a six-day Apple chart baseline is not ready")
-        meaningful = select_rising_candidates(
-            charts["uz"], baseline_uz, candidate_limit=15,
-            recently_used=recent,
+        has_complete_snapshot = (
+            len(state.get("items") or []) == EDITORIAL_CAMPAIGN_SIZE
         )
-        if len(meaningful) < 3:
+        meaningful: list[dict[str, Any]] = []
+        if baseline_uz:
+            meaningful = select_rising_candidates(
+                charts["uz"], baseline_uz, candidate_limit=15,
+                recently_used=recent,
+            )
+        if len(meaningful) >= 3:
+            candidates = add_rising_fillers(
+                meaningful, charts["uz"], candidate_limit=15,
+            )
+            bootstrap = False
+        elif has_complete_snapshot:
+            if not baseline_uz:
+                raise LookupError("a six-day Apple chart baseline is not ready")
             raise NoMeaningfulRising(
                 f"only {len(meaningful)} meaningful movers are available"
             )
-        candidates = add_rising_fillers(
-            meaningful, charts["uz"], candidate_limit=15,
-        )
+        else:
+            # Never leave /rising empty while its six-day movement baseline is
+            # being accumulated. The bootstrap is a current-chart snapshot,
+            # not a claim that rank movement has already been measured.
+            candidates = select_rising_bootstrap_candidates(
+                charts["uz"], candidate_limit=15, recently_used=recent,
+            )
+            bootstrap = True
     elif campaign_key == CAMPAIGN_DISCOVERIES:
         candidates = select_discovery_candidates(
             charts,
@@ -945,12 +1068,19 @@ async def _publish_apple_collection(
         ),
         searcher=searcher,
     )
-    in_slot = _in_campaign_slot(campaign_key, now)
+    source_in_slot = _in_campaign_slot(campaign_key, now)
+    in_slot = source_in_slot and not bootstrap
     # Initial snapshots are materialized immediately for command speed, but a
     # deploy outside the editorial slot must not blast three messages at once.
     campaign = _campaign_descriptor(campaign_key, now) if in_slot else None
-    next_slot = next_campaign_slot(campaign_key, now)
+    next_slot = next_campaign_slot(
+        campaign_key,
+        now + CAMPAIGN_SLOT_WINDOW_SECONDS if bootstrap and source_in_slot else now,
+    )
     refresh_seconds = WEEK_SECONDS if in_slot else max(60, next_slot - now)
+    next_provider_state = _next_provider_state(state, items, now=now)
+    if campaign_key == CAMPAIGN_RISING:
+        next_provider_state["rising_bootstrap"] = bootstrap
     result = await db.publish_music_collection(
         campaign_key,
         items,
@@ -958,7 +1088,7 @@ async def _publish_apple_collection(
         claim_token=claim_token,
         refresh_seconds=refresh_seconds,
         resolutions=_next_resolutions(state, items),
-        provider_state=_next_provider_state(state, items, now=now),
+        provider_state=next_provider_state,
         campaign=campaign,
     )
     if in_slot:
@@ -979,7 +1109,7 @@ async def _publish_apple_collection(
             now=now,
         )
         result = {**dict(result), "campaign_id": campaign_id}
-    return result
+    return {**dict(result), "bootstrap": bootstrap}
 
 
 async def refresh_apple_collections_once(
@@ -991,6 +1121,7 @@ async def refresh_apple_collections_once(
     ),
     searcher: Callable[[str, int], Awaitable[list[SearchItem]]] = search_tracks,
     retry_base_seconds: int = 30 * 60,
+    force_empty: bool = False,
 ) -> dict[str, Any]:
     """Capture chart history and independently refresh due editorial lists."""
     timestamp = int(time.time()) if now is None else int(now)
@@ -1010,7 +1141,10 @@ async def refresh_apple_collections_once(
     )
     any_empty_due = any(
         len(state.get("items") or []) != EDITORIAL_CAMPAIGN_SIZE
-        and int(state.get("next_refresh_at") or 0) <= timestamp
+        and (
+            force_empty
+            or int(state.get("next_refresh_at") or 0) <= timestamp
+        )
         for state in states.values()
     )
     any_slot_due = any(
@@ -1050,10 +1184,12 @@ async def refresh_apple_collections_once(
             key,
             timestamp,
             lease_seconds=REFRESH_LEASE_SECONDS,
-            force=False,
+            force=force_empty and empty,
         )
         if claim_token is None:
             outcomes[key] = {"status": "not_due"}
+            if force_empty and empty:
+                outcomes[key]["repair_pending"] = True
             continue
         try:
             result = await _publish_apple_collection(
@@ -1121,6 +1257,7 @@ async def refresh_mood_collection_once(
     reserved_source_ids: Iterable[str] = (),
     searcher: Callable[[str, int], Awaitable[list[SearchItem]]] = search_tracks,
     retry_base_seconds: int = 30 * 60,
+    force_empty: bool = False,
 ) -> dict[str, Any]:
     """Refresh one mood atomically; source failures leave its old ten intact."""
     slug = str(mood or "").strip().lower()
@@ -1133,10 +1270,13 @@ async def refresh_mood_collection_once(
         key,
         timestamp,
         lease_seconds=REFRESH_LEASE_SECONDS,
-        force=False,
+        force=force_empty and empty,
     )
     if claim_token is None:
-        return {"status": "not_due"}
+        result = {"status": "not_due"}
+        if force_empty and empty:
+            result["repair_pending"] = True
+        return result
     try:
         items = await build_mood_collection(
             slug,
@@ -1185,6 +1325,7 @@ async def refresh_mood_collections_once(
     now: int | None = None,
     searcher: Callable[[str, int], Awaitable[list[SearchItem]]] = search_tracks,
     retry_base_seconds: int = 30 * 60,
+    force_empty: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Refresh all five moods sequentially with failure isolation."""
     timestamp = int(time.time()) if now is None else int(now)
@@ -1215,6 +1356,7 @@ async def refresh_mood_collections_once(
             reserved_source_ids=reserved,
             searcher=searcher,
             retry_base_seconds=retry_base_seconds,
+            force_empty=force_empty,
         )
         outcomes[slug] = result
         if result.get("status") == "published":
@@ -1345,6 +1487,11 @@ async def run_music_campaign_scheduler(bot: Any, db: Any, config: Any) -> None:
         "slots=mon09,wed18,fri18 moods=weekly"
     )
     source_retry_at = 0
+    # A new release gets one immediate repair pass for snapshots left empty by
+    # older source rules. Terminal success/failure restores persisted backoff;
+    # an active stale lease keeps the one-shot pending until it can be claimed.
+    repair_empty_editorial = True
+    repair_empty_moods = True
     while True:
         try:
             # Delivery wins over provider work, including after a restart.
@@ -1354,12 +1501,20 @@ async def run_music_campaign_scheduler(bot: Any, db: Any, config: Any) -> None:
             timestamp = int(time.time())
             if timestamp >= source_retry_at:
                 try:
-                    await refresh_apple_collections_once(
+                    editorial_outcomes = await refresh_apple_collections_once(
                         db,
                         now=timestamp,
                         retry_base_seconds=30 * 60,
+                        force_empty=repair_empty_editorial,
                     )
                     source_retry_at = 0
+                    repair_empty_editorial = any(
+                        bool(result.get("repair_pending"))
+                        for result in editorial_outcomes.get(
+                            "collections", {}
+                        ).values()
+                        if isinstance(result, Mapping)
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -1372,10 +1527,16 @@ async def run_music_campaign_scheduler(bot: Any, db: Any, config: Any) -> None:
 
             # Each mood owns its lease/backoff and last-good state, so one bad
             # query cannot invalidate the other four collections.
-            await refresh_mood_collections_once(
+            mood_outcomes = await refresh_mood_collections_once(
                 db,
                 now=timestamp,
                 retry_base_seconds=30 * 60,
+                force_empty=repair_empty_moods,
+            )
+            repair_empty_moods = any(
+                bool(result.get("repair_pending"))
+                for result in mood_outcomes.values()
+                if isinstance(result, Mapping)
             )
 
             if await deliver_next_music_campaign(bot, db, config):

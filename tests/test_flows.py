@@ -39,29 +39,18 @@ def _items(n):
             for i in range(n)]
 
 
-async def test_privacy_command_discloses_retention(dp, bot, cap):
-    await dp.feed_update(bot, text_update("/privacy"))
-    message = cap.last("SendMessage")
-    assert "Privacy" in message.text
-    assert "7 days" in message.text and "30 days" in message.text
-
-
-async def test_delete_my_data_purges_db_and_memory(
-    dp, bot, cap, storage,
+@pytest.mark.parametrize("command", ["/privacy", "/delete_my_data"])
+async def test_retired_data_commands_are_silent_and_do_not_delete(
+    dp, bot, cap, storage, command,
 ):
     await storage.set_locale(100, "en")
     await storage.save_session("persisted", {"owner_user_id": 100, "url": "x"})
-    results._SESS["result"] = {"owner_user_id": 100}
-    url_download._PENDING["download"] = {"owner_user_id": 100}
 
-    await dp.feed_update(bot, text_update("/delete_my_data"))
+    await dp.feed_update(bot, text_update(command))
 
-    assert await storage.get_locale(100) is None
-    assert 100 not in await storage.get_active_user_ids()
-    assert await storage.get_session("persisted") is None
-    assert "result" not in results._SESS
-    assert "download" not in url_download._PENDING
-    assert "deleted" in cap.last("SendMessage").text.lower()
+    assert cap.methods == []
+    assert await storage.get_locale(100) == "en"
+    assert await storage.get_session("persisted") is not None
 
 
 def _fake_dl(config, counter):

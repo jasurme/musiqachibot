@@ -20,22 +20,6 @@ STRINGS = {
     "cmd_moods": "Music by mood",
     "cmd_total_users": "User count",
     "cmd_lang": "Change language",
-    "cmd_privacy": "Privacy information",
-    "cmd_delete_my_data": "Delete my stored data",
-    "btn_privacy_policy": "Full privacy policy",
-    "privacy_notice": (
-        "🔐 <b>Privacy</b>\n\n"
-        "The bot stores your Telegram user ID and language until deletion, "
-        "including to deliver bot announcements; "
-        "button/search session data for up to 7 days; and recognition match "
-        "metadata for up to 30 days. Shared Telegram file IDs may be retained. "
-        "Uploaded media and recognition samples are deleted locally after processing.\n\n"
-        "Short samples or metadata may be processed by Shazam/AudD; searches and "
-        "downloads contact the source services; lyric requests contact lyrics.ovh; "
-        "and Railway plus any configured proxy process network traffic. Use "
-        "/delete_my_data to remove data associated with your user ID."
-    ),
-    "data_deleted": "✅ Data associated with your user ID was deleted.",
     "total_users_report": (
         "👥 <b>Users</b>\n\n"
         "Total: {total}\nActive: {active}\nInactive: {inactive}"
