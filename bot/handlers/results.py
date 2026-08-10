@@ -188,26 +188,48 @@ async def present(
 
 
 async def _send_cached_track(
-    callback: CallbackQuery, db, cache_key: str, item: SearchItem, caption: str,
+    callback: CallbackQuery, _, db, cache_key: str, item: SearchItem,
+    caption: str,
 ) -> bool:
     cached = await db.get_cached_audio(cache_key)
     if not cached:
         return False
+    favorite_key = None
+    favorite_markup = None
+    if (
+        isinstance(callback.message, Message)
+        and callback.message.chat.type == "private"
+        and callback.message.chat.id == callback.from_user.id
+    ):
+        from bot.handlers.favorites import prepare_favorite_audio
+
+        favorite_key, favorite_markup = await prepare_favorite_audio(
+            db, callback.from_user.id, item, _, file_id=cached,
+        )
     try:
         await callback.message.answer_audio(
             cached, caption=caption, title=item.title or None,
             performer=item.uploader or None,
+            reply_markup=favorite_markup,
         )
     except TelegramBadRequest:
         logger.warning("Evicting invalid Telegram audio cache key=%s", cache_key)
         await db.delete_cached_audio(cache_key)
+        if favorite_key:
+            try:
+                await db.set_favorite_file_id(favorite_key, None)
+            except Exception:
+                logger.exception(
+                    "Could not clear invalid favorite file_id key=%s",
+                    favorite_key,
+                )
         return False
     return True
 
 
 async def deliver_track(
     callback: CallbackQuery, _, config: Config, db, bot_username: str,
-    item: SearchItem,
+    item: SearchItem, *, acknowledge: bool = True,
 ) -> None:
     """Deliver one exact search item through the shared cache/download path."""
     caption = f"👉 @{bot_username}"
@@ -222,9 +244,10 @@ async def deliver_track(
     try:
         # Acknowledge immediately so Telegram removes the button spinner while
         # provider/cache work continues without a separate progress message.
-        await callback.answer()
+        if acknowledge:
+            await callback.answer()
         stage = "cache"
-        if await _send_cached_track(callback, db, cache_key, item, caption):
+        if await _send_cached_track(callback, _, db, cache_key, item, caption):
             logger.info(
                 "track delivery video_id=%s cache_hit=true coalesced=false "
                 "duration_ms=%s",
@@ -237,7 +260,9 @@ async def deliver_track(
         # wait without consuming heavy capacity, then reuse its new file_id.
         async with downloader.media_singleflight_lock(cache_key):
             stage = "cache"
-            if await _send_cached_track(callback, db, cache_key, item, caption):
+            if await _send_cached_track(
+                callback, _, db, cache_key, item, caption
+            ):
                 logger.info(
                     "track delivery video_id=%s cache_hit=true coalesced=true "
                     "duration_ms=%s",
@@ -275,10 +300,32 @@ async def deliver_track(
                 )
                 return
             upload_started = time.perf_counter()
+            favorite_key = None
+            favorite_markup = None
+            if (
+                isinstance(callback.message, Message)
+                and callback.message.chat.type == "private"
+                and callback.message.chat.id == callback.from_user.id
+            ):
+                from bot.handlers.favorites import prepare_favorite_audio
+
+                favorite_key, favorite_markup = await prepare_favorite_audio(
+                    db,
+                    callback.from_user.id,
+                    {
+                        "video_id": item.video_id,
+                        "source_url": item.url,
+                        "title": result.title or item.title or "Music",
+                        "duration": result.duration or item.duration,
+                        "uploader": result.uploader or item.uploader,
+                    },
+                    _,
+                )
             sent = await callback.message.answer_audio(
                 FSInputFile(path), caption=caption,
                 title=result.title or item.title,
                 performer=result.uploader or item.uploader,
+                reply_markup=favorite_markup,
             )
             logger.info(
                 "track delivery video_id=%s cache_hit=false ext=%s bytes=%s "
@@ -288,6 +335,17 @@ async def deliver_track(
                 round((time.perf_counter() - delivery_started) * 1000),
             )
             if sent.audio:
+                if favorite_key:
+                    try:
+                        await db.set_favorite_file_id(
+                            favorite_key, sent.audio.file_id
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Audio delivered but favorite file_id update failed "
+                            "key=%s",
+                            favorite_key,
+                        )
                 try:
                     await db.set_cached_audio(
                         cache_key, sent.audio.file_id, item.title

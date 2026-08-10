@@ -348,5 +348,6 @@ async def test_admin_slash_command_reaches_normal_command_router(
     )
     await dp.feed_update(bot, update)
     assert cap.by("CopyMessage") == []
-    assert cap.by("SendMessage")
-    assert "music" in cap.last("SendMessage").text.lower()
+    messages = cap.by("SendMessage")
+    assert messages
+    assert any("music" in message.text.lower() for message in messages)

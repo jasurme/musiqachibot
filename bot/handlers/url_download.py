@@ -44,12 +44,14 @@ def purge_owner(owner_user_id: int) -> None:
 
 async def _remember(
     url: str, title: str, db, owner_user_id: int | None = None,
-    media_id: str | None = None,
+    media_id: str | None = None, uploader: str = "",
+    duration: float | None = None,
 ) -> str:
     token = secrets.token_urlsafe(6)
     item = {
         "url": url, "title": title, "owner_user_id": owner_user_id,
-        "media_id": media_id,
+        "media_id": media_id, "uploader": uploader,
+        "duration": duration,
     }
     _PENDING[token] = item
     while len(_PENDING) > _PENDING_MAX:
@@ -108,6 +110,35 @@ def _quality_keyboard(token: str, heights: list[int], _) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _favorite_audio_item(item: dict, result=None) -> dict:
+    """Build stable catalog metadata for a downloaded social/source audio."""
+    source_url = str(item.get("url") or "").strip()
+    media_id = str(item.get("media_id") or "").strip()
+    provider = downloader.provider_name(source_url)
+    video_id = downloader.youtube_video_id(source_url)
+    title = str(
+        getattr(result, "title", None) or item.get("title") or "Music"
+    ).strip()
+    uploader = str(
+        getattr(result, "uploader", None) or item.get("uploader") or ""
+    ).strip()
+    duration = getattr(result, "duration", None)
+    if duration is None:
+        duration = item.get("duration")
+    favorite = {
+        "source_url": source_url,
+        "source_key": (
+            f"{provider}:{media_id}" if media_id else source_url
+        ),
+        "title": title or "Music",
+        "duration": duration,
+        "uploader": uploader,
+    }
+    if video_id:
+        favorite["video_id"] = video_id
+    return favorite
+
+
 @router.message(_has_supported_url)
 async def handle_url(message: Message, _, db, bot_username: str, **kwargs):
     # Links in busy groups are opt-in, just like text search.
@@ -145,7 +176,13 @@ async def offer_qualities(
     if owner_user_id is None and message.from_user and not message.from_user.is_bot:
         owner_user_id = message.from_user.id
     token = await _remember(
-        meta.url, meta.title, db, owner_user_id, media_id=meta.media_id
+        meta.url,
+        meta.title,
+        db,
+        owner_user_id,
+        media_id=meta.media_id,
+        uploader=meta.uploader,
+        duration=meta.duration,
     )
     kb = _quality_keyboard(token, meta.heights, _)
     caption = ("🎬 " + html.escape(meta.title[:900])) if meta.title else _("choose_quality")
@@ -204,9 +241,32 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
             # delivery can still take noticeable time for the client.
             await callback.answer()
             acknowledged = True
+            favorite_key = None
+            favorite_markup = None
+            if (
+                quality == "audio"
+                and isinstance(callback.message, Message)
+                and callback.message.chat.type == "private"
+                and callback.message.chat.id == callback.from_user.id
+            ):
+                from bot.handlers.favorites import prepare_favorite_audio
+
+                favorite_key, favorite_markup = await prepare_favorite_audio(
+                    db,
+                    callback.from_user.id,
+                    _favorite_audio_item(item),
+                    _,
+                    file_id=cached,
+                )
             try:
                 if quality == "audio":
-                    await callback.message.answer_audio(cached, caption=sig)
+                    await callback.message.answer_audio(
+                        cached,
+                        caption=sig,
+                        title=title or None,
+                        performer=item.get("uploader") or None,
+                        reply_markup=favorite_markup,
+                    )
                 else:
                     await callback.message.answer_video(cached, caption=video_caption)
             except TelegramBadRequest:
@@ -217,6 +277,14 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                     logger.error("Media cache eviction failed error=%s", type(exc).__name__)
                     await callback.message.answer(_("generic_error"))
                     return
+                if favorite_key:
+                    try:
+                        await db.set_favorite_file_id(favorite_key, None)
+                    except Exception:
+                        logger.exception(
+                            "Could not clear invalid favorite file_id key=%s",
+                            favorite_key,
+                        )
             except Exception as exc:
                 logger.error("Cached media delivery failed error=%s", type(exc).__name__)
                 await callback.message.answer(_("generic_error"))
@@ -331,9 +399,25 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                 return
 
             if quality == "audio":
+                favorite_key = None
+                favorite_markup = None
+                if (
+                    isinstance(callback.message, Message)
+                    and callback.message.chat.type == "private"
+                    and callback.message.chat.id == callback.from_user.id
+                ):
+                    from bot.handlers.favorites import prepare_favorite_audio
+
+                    favorite_key, favorite_markup = await prepare_favorite_audio(
+                        db,
+                        callback.from_user.id,
+                        _favorite_audio_item(item, result),
+                        _,
+                    )
                 sent = await callback.message.answer_audio(
                     FSInputFile(path), caption=sig,
                     title=result.title or None, performer=result.uploader or None,
+                    reply_markup=favorite_markup,
                 )
                 file_id = sent.audio.file_id if sent.audio else None
             else:
@@ -343,6 +427,17 @@ async def on_quality(callback: CallbackQuery, _, config: Config, db, bot_usernam
                 )
                 file_id = sent.video.file_id if sent.video else None
             if file_id:
+                if quality == "audio" and favorite_key:
+                    try:
+                        await db.set_favorite_file_id(
+                            favorite_key, file_id
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Audio delivered but favorite file_id update failed "
+                            "key=%s",
+                            favorite_key,
+                        )
                 try:
                     await db.set_cached_audio(cache_key, file_id, title)
                 except Exception:

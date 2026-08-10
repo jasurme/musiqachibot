@@ -9,11 +9,16 @@ STRINGS = {
         "🔗 An Instagram, TikTok, YouTube, Facebook or X link\n\n"
         "🕺 Enjoy!"
     ),
+    "favorites_intro": (
+        "❤️ <b>You can now save songs you love in your Favorites playlist!</b>"
+    ),
     "choose_language": "🌐 Choose your language:",
     "language_set": "✅ Language changed.",
     "cmd_start": "Start",
     "cmd_round": "Make a round video",
     "cmd_top_music": "Top Music",
+    "cmd_favorites": "Favorites",
+    "btn_open_favorites": "❤️ Favorites",
     "cmd_new_music": "New Music",
     "cmd_rising": "Rising music",
     "cmd_discoveries": "Weekly discoveries",
@@ -24,6 +29,16 @@ STRINGS = {
         "👥 <b>Users</b>\n\n"
         "Total: {total}\nActive: {active}\nInactive: {inactive}"
     ),
+    "favorites_header": "❤️ <b>Favorites</b> · {count} songs",
+    "favorites_empty": (
+        "🤍 Your Favorites are empty. Tap the heart under a song to save it."
+    ),
+    "btn_add_favorite": "🤍 Save to Favorites",
+    "btn_favorite_saved": "❤️ In Favorites",
+    "favorite_added": "❤️ Added to Favorites.",
+    "favorite_exists": "❤️ This song is already in Favorites.",
+    "favorite_removed": "🗑 Removed from Favorites.",
+    "favorite_unavailable": "⚠️ This song is no longer in Favorites.",
     "broadcast_done": (
         "✅ Broadcast complete. Sent: {sent}. "
         "Inactive: {inactive}. Failed: {failed}."

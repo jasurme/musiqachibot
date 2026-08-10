@@ -542,23 +542,31 @@ async def test_admin_unsupported_message_type_stops_before_audience(
 # ── /start & language ────────────────────────────────────
 async def test_start_welcome_and_language_buttons(dp, bot, cap):
     await dp.feed_update(bot, text_update("/start"))
-    sm = cap.last("SendMessage")
-    assert sm is not None and "👋" in sm.text
-    datas = [b.callback_data for row in sm.reply_markup.inline_keyboard for b in row]
+    welcome, favorites_intro = cap.by("SendMessage")
+    assert "👋" in welcome.text
+    datas = [
+        b.callback_data
+        for row in welcome.reply_markup.inline_keyboard
+        for b in row
+    ]
     assert {"setlang:uz", "setlang:ru", "setlang:en"} <= set(datas)
+    assert "Favorites" in favorites_intro.text
+    assert favorites_intro.reply_markup.is_persistent is True
+    assert favorites_intro.reply_markup.resize_keyboard is True
+    assert favorites_intro.reply_markup.keyboard[0][0].text == "❤️ Favorites"
 
 
 async def test_first_time_user_uses_configured_default(dp, bot, cap):
     # The fixture config sets English; Telegram client language does not override it.
     await dp.feed_update(bot, text_update("/start", user_id=777, lang="en"))
-    sm = cap.last("SendMessage")
+    sm = cap.by("SendMessage")[0]
     assert "Hi!" in sm.text
 
 
 async def test_stored_choice_overrides_default(dp, bot, cap, storage):
     await storage.set_locale(888, "en")
     await dp.feed_update(bot, text_update("/start", user_id=888, lang="uz"))
-    sm = cap.last("SendMessage")
+    sm = cap.by("SendMessage")[0]
     assert "Hi!" in sm.text  # explicit English choice wins over uz default
 
 
@@ -568,6 +576,22 @@ async def test_language_switch_persists(dp, bot, cap, storage):
     # welcome after switch is Russian
     sm = cap.last("SendMessage")
     assert "Привет" in sm.text
+    assert sm.reply_markup.is_persistent is True
+    assert sm.reply_markup.keyboard[0][0].text == "❤️ Избранное"
+
+
+async def test_group_start_never_installs_personal_favorites_keyboard(
+    dp, bot, cap,
+):
+    await dp.feed_update(
+        bot,
+        text_update(
+            "/start", user_id=777, chat_id=-100777, chat_type="supergroup"
+        ),
+    )
+    messages = cap.by("SendMessage")
+    assert len(messages) == 1
+    assert messages[0].reply_markup.inline_keyboard
 
 
 # ── Feature A: search → list → pick → cache ─────────────

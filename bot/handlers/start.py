@@ -7,6 +7,7 @@ from aiogram.types import (
     Message,
 )
 
+from bot.handlers.favorites import favorites_reply_keyboard
 from bot.i18n import SUPPORTED, t
 
 router = Router(name="start")
@@ -22,9 +23,20 @@ def _lang_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _is_private_user_chat(message: Message, user_id: int) -> bool:
+    return message.chat.type == "private" and message.chat.id == user_id
+
+
 @router.message(CommandStart())
-async def cmd_start(message: Message, _, **kwargs):
+async def cmd_start(message: Message, _, locale: str, **kwargs):
     await message.answer(_("welcome"), reply_markup=_lang_keyboard())
+    if message.from_user and _is_private_user_chat(
+        message, message.from_user.id
+    ):
+        await message.answer(
+            _("favorites_intro"),
+            reply_markup=favorites_reply_keyboard(locale),
+        )
 
 
 @router.message(Command("lang"))
@@ -44,4 +56,12 @@ async def set_language(callback: CallbackQuery, db, locale: str, **kwargs):
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    await callback.message.answer(t("welcome", requested_locale))
+    reply_markup = None
+    if (
+        isinstance(callback.message, Message)
+        and _is_private_user_chat(callback.message, callback.from_user.id)
+    ):
+        reply_markup = favorites_reply_keyboard(requested_locale)
+    await callback.message.answer(
+        t("welcome", requested_locale), reply_markup=reply_markup
+    )

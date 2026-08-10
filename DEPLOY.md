@@ -38,8 +38,8 @@ the bot processes any user media.
 
 ## 3. Add a Volume (so data survives redeploys)
 Railway's filesystem is **wiped on every redeploy**. Without a volume, the SQLite
-DB resets each deploy → language prefs, the `file_id` cache, and button sessions
-(the "havola eskirdi" fix) are all lost.
+DB resets each deploy → language prefs, favorites, the `file_id` cache, and
+button sessions (the "havola eskirdi" fix) are all lost.
 
 1. Service → **Settings → Volumes → New Volume**, mount path **`/data`**.
 2. Set `DB_PATH=/data/musiqa.db`.
@@ -48,7 +48,8 @@ That's it — the app writes its DB there and it persists.
 
 The same database stores the last complete Top 10, all weekly music and mood
 snapshots, ranking history, durable campaign cursors, admin video confirmation
-drafts, and every administrator-announcement cursor.
+drafts, every administrator-announcement cursor, and per-user favorite
+playlists. Saved tracks reuse Telegram `file_id` values for instant playback.
 Without the volume, the stored lists must be rebuilt after every deployment and
 partially delivered announcements cannot resume.
 

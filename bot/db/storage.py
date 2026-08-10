@@ -1,4 +1,4 @@
-"""SQLite storage for locale, bounded sessions/recognition, and file_id cache.
+"""SQLite storage for users, favorites, sessions, recognition, and media cache.
 
 The file_id cache is the money-saver: once a song has been sent once, Telegram
 gives us a `file_id` we can re-send instantly, for free, with no re-download.
@@ -10,6 +10,7 @@ import re
 import secrets
 import time
 from hashlib import sha256
+from urllib.parse import urlsplit
 
 import aiosqlite
 
@@ -27,6 +28,16 @@ _YOUTUBE_VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{6,32}")
 _MUSIC_CAMPAIGN_STATUSES = {
     "queued", "sending", "completed", "superseded", "failed",
 }
+_FAVORITE_TITLE_MAX = 512
+_FAVORITE_UPLOADER_MAX = 512
+_TELEGRAM_FILE_ID_MAX = 2048
+_FAVORITE_SOURCE_URL_MAX = 4096
+_FAVORITE_TRACK_KEY = re.compile(
+    r"[a-z][a-z0-9_]{0,11}:[A-Za-z0-9._-]{1,40}"
+)
+_UNSAVED_FAVORITE_TRACK_TTL = 30 * 24 * 60 * 60
+_UNSAVED_FAVORITE_TRACK_LIMIT = 5000
+_FAVORITE_PRUNE_INTERVAL = 60 * 60
 
 
 class Storage:
@@ -53,12 +64,17 @@ class Storage:
             self._connect_uri = False
         # The second connection still needs one in-process transaction owner.
         self._music_write_lock = asyncio.Lock()
+        # Serialize the small catalog/membership write transactions so rapid
+        # duplicate callbacks cannot observe partially updated favorite state.
+        self._favorite_write_lock = asyncio.Lock()
+        self._favorite_prune_after = 0
 
     async def init(self) -> None:
         self._db = await aiosqlite.connect(
             self._connect_target, uri=self._connect_uri
         )
         await self._db.execute("PRAGMA busy_timeout = 5000")
+        await self._db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
             await self._db.execute("PRAGMA journal_mode = WAL")
         await self._db.execute(
@@ -89,6 +105,43 @@ class Storage:
             " file_id TEXT NOT NULL,"
             " title TEXT,"
             " created_at TEXT DEFAULT (datetime('now')))"
+        )
+        # Track metadata is a small durable catalog, separate from each user's
+        # playlist membership. A heart button can therefore keep a compact,
+        # stable track key and still work after its source session/restart.
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS favorite_tracks ("
+            " track_key TEXT PRIMARY KEY,"
+            " video_id TEXT,"
+            " source_url TEXT,"
+            " title TEXT NOT NULL,"
+            " duration INTEGER,"
+            " uploader TEXT NOT NULL DEFAULT '',"
+            " audio_file_id TEXT,"
+            " updated_at INTEGER NOT NULL)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_favorite_tracks_updated "
+            "ON favorite_tracks(updated_at)"
+        )
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS user_favorites ("
+            " user_id INTEGER NOT NULL CHECK (user_id > 0),"
+            " track_key TEXT NOT NULL,"
+            " saved_at INTEGER NOT NULL,"
+            " PRIMARY KEY(user_id, track_key),"
+            " FOREIGN KEY(user_id) REFERENCES users(user_id) "
+            "ON DELETE CASCADE,"
+            " FOREIGN KEY(track_key) REFERENCES favorite_tracks(track_key) "
+            "ON DELETE CASCADE)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_favorites_page "
+            "ON user_favorites(user_id, saved_at DESC, track_key)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_favorites_track "
+            "ON user_favorites(track_key)"
         )
         await self._db.execute(
             "CREATE TABLE IF NOT EXISTS recognition_cache ("
@@ -285,6 +338,10 @@ class Storage:
             "INSERT OR IGNORE INTO users (user_id) "
             "SELECT DISTINCT owner_user_id FROM recognition_cache "
             "WHERE owner_user_id IS NOT NULL AND owner_user_id > 0"
+        )
+        await self._db.execute(
+            "INSERT OR IGNORE INTO users (user_id) "
+            "SELECT DISTINCT user_id FROM user_favorites WHERE user_id > 0"
         )
         async with self._db.execute("SELECT data FROM sessions") as cur:
             session_rows = await cur.fetchall()
@@ -1945,6 +2002,400 @@ class Storage:
         await self._music_db.commit()
         return cursor.rowcount == 1
 
+    # ── per-user favorite playlists ──────────────────
+    @staticmethod
+    def _favorite_value(item: object, key: str):
+        if isinstance(item, dict):
+            return item.get(key)
+        return getattr(item, key, None)
+
+    @staticmethod
+    def _favorite_user_id(user_id: int) -> int:
+        if isinstance(user_id, bool):
+            raise ValueError("favorite user_id must be a positive integer")
+        try:
+            value = int(user_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "favorite user_id must be a positive integer"
+            ) from exc
+        if value <= 0:
+            raise ValueError("favorite user_id must be a positive integer")
+        return value
+
+    @staticmethod
+    def _favorite_video_id(video_id: object) -> str | None:
+        if video_id is None or video_id == "":
+            return None
+        value = str(video_id).strip()
+        if _YOUTUBE_VIDEO_ID.fullmatch(value) is None:
+            raise ValueError("favorite has an invalid video_id")
+        return value
+
+    @staticmethod
+    def _favorite_source_url(source_url: object) -> str | None:
+        if source_url is None or source_url == "":
+            return None
+        if not isinstance(source_url, str):
+            raise ValueError("favorite source_url must be text")
+        value = source_url.strip()
+        if not value or len(value) > _FAVORITE_SOURCE_URL_MAX:
+            raise ValueError("favorite source_url is empty or too long")
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("favorite source_url must be an HTTP(S) URL")
+        return value
+
+    @staticmethod
+    def _favorite_track_key(track_key: object) -> str:
+        value = str(track_key or "").strip()
+        if _FAVORITE_TRACK_KEY.fullmatch(value) is None:
+            raise ValueError("favorite has an invalid track_key")
+        return value
+
+    @classmethod
+    def _favorite_lookup_key(cls, identifier: object) -> str:
+        """Accept either the public YouTube ID or the durable opaque key."""
+        value = str(identifier or "").strip()
+        if _YOUTUBE_VIDEO_ID.fullmatch(value):
+            return f"yt:{value}"
+        return cls._favorite_track_key(value)
+
+    @classmethod
+    def _normalize_favorite_item(
+        cls, item: object, *, file_id: str | None = None,
+    ) -> dict:
+        """Reduce a search/download item to the bounded playlist schema."""
+        if item is None:
+            raise ValueError("favorite item is required")
+        video_id = cls._favorite_video_id(
+            cls._favorite_value(item, "video_id")
+        )
+        source_url = cls._favorite_value(item, "source_url")
+        if source_url is None:
+            source_url = cls._favorite_value(item, "url")
+        source_url = cls._favorite_source_url(source_url)
+        if source_url is None and video_id:
+            source_url = f"https://www.youtube.com/watch?v={video_id}"
+        track_key = cls._favorite_value(item, "track_key")
+        source_key = cls._favorite_value(item, "source_key")
+        if source_key is None:
+            source_key = cls._favorite_value(item, "media_key")
+        if track_key is not None:
+            track_key = cls._favorite_track_key(track_key)
+        elif video_id:
+            track_key = f"yt:{video_id}"
+        elif source_key is not None:
+            if not isinstance(source_key, str) or not source_key.strip():
+                raise ValueError("favorite source_key must be non-empty text")
+            digest = sha256(source_key.strip().encode("utf-8")).hexdigest()[:40]
+            track_key = f"m:{digest}"
+        elif source_url:
+            digest = sha256(source_url.encode("utf-8")).hexdigest()[:40]
+            track_key = f"u:{digest}"
+        else:
+            raise ValueError(
+                "favorite needs video_id, track_key, source_url, "
+                "or source_key"
+            )
+
+        raw_title = cls._favorite_value(item, "title")
+        if not isinstance(raw_title, str):
+            raise ValueError("favorite title must be text")
+        title = " ".join(raw_title.split())
+        if not title or len(title) > _FAVORITE_TITLE_MAX:
+            raise ValueError("favorite title is empty or too long")
+
+        duration = cls._favorite_value(item, "duration")
+        if duration is not None:
+            if isinstance(duration, bool):
+                raise ValueError("favorite duration must be an integer")
+            try:
+                duration = int(duration)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "favorite duration must be an integer"
+                ) from exc
+            if duration < 0:
+                raise ValueError("favorite duration cannot be negative")
+
+        uploader = cls._favorite_value(item, "uploader") or ""
+        if not isinstance(uploader, str):
+            raise ValueError("favorite uploader must be text")
+        uploader = " ".join(uploader.split())
+        if len(uploader) > _FAVORITE_UPLOADER_MAX:
+            raise ValueError("favorite uploader is too long")
+
+        if file_id is None:
+            file_id = cls._favorite_value(item, "file_id")
+        if file_id is not None:
+            if not isinstance(file_id, str):
+                raise ValueError("favorite file_id must be text")
+            file_id = file_id.strip()
+            if not file_id or len(file_id) > _TELEGRAM_FILE_ID_MAX:
+                raise ValueError("favorite file_id is empty or too long")
+        return {
+            "track_key": track_key,
+            "video_id": video_id,
+            "source_url": source_url,
+            "title": title,
+            "duration": duration,
+            "uploader": uploader,
+            "file_id": file_id,
+        }
+
+    @staticmethod
+    def _decode_favorite_row(row) -> dict | None:
+        if not row:
+            return None
+        return {
+            "track_key": row[0],
+            "video_id": row[1],
+            "source_url": row[2],
+            "title": row[3],
+            "duration": int(row[4]) if row[4] is not None else None,
+            "uploader": row[5],
+            "file_id": row[6],
+            "updated_at": int(row[7]),
+            "saved_at": int(row[8]) if row[8] is not None else None,
+        }
+
+    async def upsert_favorite_track(
+        self, item: object, *, file_id: str | None = None,
+    ) -> str:
+        """Register metadata for a stable heart callback and return its key.
+
+        Catalog registration does not favorite the track for any user. Old
+        message buttons remain useful across process restarts, while bounded
+        cleanup removes only old catalog rows that nobody has saved.
+        """
+        favorite = self._normalize_favorite_item(item, file_id=file_id)
+        now = int(time.time())
+        async with self._favorite_write_lock:
+            try:
+                await self._db.execute(
+                    "INSERT INTO favorite_tracks "
+                    "(track_key, video_id, source_url, title, duration, "
+                    "uploader, audio_file_id, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(track_key) DO UPDATE SET video_id = "
+                    "COALESCE(excluded.video_id, video_id), source_url = "
+                    "COALESCE(excluded.source_url, source_url), "
+                    "title = excluded.title, duration = "
+                    "COALESCE(excluded.duration, duration), uploader = "
+                    "CASE WHEN excluded.uploader = '' THEN uploader "
+                    "ELSE excluded.uploader END, audio_file_id = "
+                    "COALESCE(excluded.audio_file_id, audio_file_id), "
+                    "updated_at = excluded.updated_at",
+                    (
+                        favorite["track_key"], favorite["video_id"],
+                        favorite["source_url"], favorite["title"],
+                        favorite["duration"], favorite["uploader"],
+                        favorite["file_id"], now,
+                    ),
+                )
+                if now >= self._favorite_prune_after:
+                    await self._db.execute(
+                        "DELETE FROM favorite_tracks WHERE updated_at < ? "
+                        "AND NOT EXISTS (SELECT 1 FROM user_favorites uf "
+                        "WHERE uf.track_key = favorite_tracks.track_key)",
+                        (now - _UNSAVED_FAVORITE_TRACK_TTL,),
+                    )
+                    await self._db.execute(
+                        "DELETE FROM favorite_tracks WHERE track_key IN ("
+                        "SELECT ft.track_key FROM favorite_tracks ft "
+                        "WHERE NOT EXISTS (SELECT 1 FROM user_favorites uf "
+                        "WHERE uf.track_key = ft.track_key) "
+                        "ORDER BY ft.updated_at DESC, ft.track_key DESC "
+                        "LIMIT -1 OFFSET ?)",
+                        (_UNSAVED_FAVORITE_TRACK_LIMIT,),
+                    )
+                await self._db.commit()
+                if now >= self._favorite_prune_after:
+                    self._favorite_prune_after = (
+                        now + _FAVORITE_PRUNE_INTERVAL
+                    )
+            except Exception:
+                await self._db.rollback()
+                raise
+        return favorite["track_key"]
+
+    async def add_favorite(self, user_id: int, track_key: str) -> bool:
+        """Idempotently add a registered track to one user's playlist."""
+        owner = self._favorite_user_id(user_id)
+        key = self._favorite_lookup_key(track_key)
+        async with self._favorite_write_lock:
+            try:
+                await self._db.execute(
+                    "INSERT INTO users (user_id) VALUES (?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET is_active = 1, "
+                    "deactivated_at = NULL",
+                    (owner,),
+                )
+                cursor = await self._db.execute(
+                    "INSERT OR IGNORE INTO user_favorites "
+                    "(user_id, track_key, saved_at) "
+                    "SELECT ?, track_key, ? FROM favorite_tracks "
+                    "WHERE track_key = ?",
+                    (owner, time.time_ns(), key),
+                )
+                if cursor.rowcount == 0:
+                    async with self._db.execute(
+                        "SELECT 1 FROM favorite_tracks WHERE track_key = ?",
+                        (key,),
+                    ) as cur:
+                        exists = await cur.fetchone()
+                    if not exists:
+                        raise KeyError("favorite track is no longer available")
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+        return cursor.rowcount == 1
+
+    async def remove_favorite(self, user_id: int, identifier: str) -> bool:
+        """Idempotently remove by video ID/track key; report whether it changed."""
+        owner = self._favorite_user_id(user_id)
+        track_key = self._favorite_lookup_key(identifier)
+        async with self._favorite_write_lock:
+            cursor = await self._db.execute(
+                "DELETE FROM user_favorites WHERE user_id = ? AND track_key = ?",
+                (owner, track_key),
+            )
+            await self._db.commit()
+        return cursor.rowcount == 1
+
+    async def toggle_favorite(
+        self, user_id: int, track_key: str,
+    ) -> bool:
+        """Atomically toggle one track; return ``True`` when it is now saved.
+
+        Button handlers should normally use explicit ``add_favorite`` and
+        ``remove_favorite`` actions so a stale/retried callback is idempotent.
+        This method exists for interfaces that intentionally expose a toggle.
+        """
+        owner = self._favorite_user_id(user_id)
+        key = self._favorite_lookup_key(track_key)
+        async with self._favorite_write_lock:
+            try:
+                cursor = await self._db.execute(
+                    "DELETE FROM user_favorites "
+                    "WHERE user_id = ? AND track_key = ?",
+                    (owner, key),
+                )
+                if cursor.rowcount == 1:
+                    await self._db.commit()
+                    return False
+                await self._db.execute(
+                    "INSERT INTO users (user_id) VALUES (?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET is_active = 1, "
+                    "deactivated_at = NULL",
+                    (owner,),
+                )
+                inserted = await self._db.execute(
+                    "INSERT OR IGNORE INTO user_favorites "
+                    "(user_id, track_key, saved_at) "
+                    "SELECT ?, track_key, ? FROM favorite_tracks "
+                    "WHERE track_key = ?",
+                    (owner, time.time_ns(), key),
+                )
+                if inserted.rowcount == 0:
+                    async with self._db.execute(
+                        "SELECT 1 FROM favorite_tracks WHERE track_key = ?",
+                        (key,),
+                    ) as cur:
+                        exists = await cur.fetchone()
+                    if not exists:
+                        raise KeyError("favorite track is no longer available")
+                await self._db.commit()
+                return True
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def is_favorite(self, user_id: int, identifier: str) -> bool:
+        owner = self._favorite_user_id(user_id)
+        track_key = self._favorite_lookup_key(identifier)
+        async with self._db.execute(
+            "SELECT 1 FROM user_favorites "
+            "WHERE user_id = ? AND track_key = ?",
+            (owner, track_key),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def get_favorite(self, user_id: int, identifier: str) -> dict | None:
+        owner = self._favorite_user_id(user_id)
+        track_key = self._favorite_lookup_key(identifier)
+        async with self._db.execute(
+            "SELECT ft.track_key, ft.video_id, ft.source_url, ft.title, "
+            "ft.duration, ft.uploader, ft.audio_file_id, ft.updated_at, "
+            "uf.saved_at FROM user_favorites uf JOIN favorite_tracks ft "
+            "ON ft.track_key = uf.track_key "
+            "WHERE uf.user_id = ? AND uf.track_key = ?",
+            (owner, track_key),
+        ) as cur:
+            row = await cur.fetchone()
+        return self._decode_favorite_row(row)
+
+    async def get_favorite_track(self, track_key: str) -> dict | None:
+        """Resolve catalog metadata for a durable heart callback."""
+        key = self._favorite_lookup_key(track_key)
+        async with self._db.execute(
+            "SELECT track_key, video_id, source_url, title, duration, "
+            "uploader, audio_file_id, updated_at, NULL "
+            "FROM favorite_tracks WHERE track_key = ?",
+            (key,),
+        ) as cur:
+            row = await cur.fetchone()
+        return self._decode_favorite_row(row)
+
+    async def list_favorites(
+        self, user_id: int, *, limit: int = 10, offset: int = 0,
+    ) -> list[dict]:
+        """Return one bounded, stable newest-first playlist page."""
+        owner = self._favorite_user_id(user_id)
+        page_size = max(1, min(int(limit), 100))
+        page_offset = max(0, int(offset))
+        async with self._db.execute(
+            "SELECT ft.track_key, ft.video_id, ft.source_url, ft.title, "
+            "ft.duration, ft.uploader, ft.audio_file_id, ft.updated_at, "
+            "uf.saved_at FROM user_favorites uf JOIN favorite_tracks ft "
+            "ON ft.track_key = uf.track_key WHERE uf.user_id = ? "
+            "ORDER BY uf.saved_at DESC, uf.track_key DESC LIMIT ? OFFSET ?",
+            (owner, page_size, page_offset),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [self._decode_favorite_row(row) for row in rows]
+
+    async def count_favorites(self, user_id: int) -> int:
+        owner = self._favorite_user_id(user_id)
+        async with self._db.execute(
+            "SELECT COUNT(*) FROM user_favorites WHERE user_id = ?",
+            (owner,),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+    async def set_favorite_file_id(
+        self, track_key: str, file_id: str | None,
+    ) -> bool:
+        """Refresh or clear Telegram's reusable audio handle for a favorite."""
+        key = self._favorite_lookup_key(track_key)
+        if file_id is not None:
+            if not isinstance(file_id, str):
+                raise ValueError("favorite file_id must be text")
+            file_id = file_id.strip()
+            if not file_id or len(file_id) > _TELEGRAM_FILE_ID_MAX:
+                raise ValueError("favorite file_id is empty or too long")
+        async with self._favorite_write_lock:
+            cursor = await self._db.execute(
+                "UPDATE favorite_tracks SET audio_file_id = ?, updated_at = ? "
+                "WHERE track_key = ?",
+                (file_id, int(time.time()), key),
+            )
+            await self._db.commit()
+        return cursor.rowcount == 1
+
     # ── audio cache (used from Feature A onward) ─────────
     async def get_cached_audio(self, key: str) -> str | None:
         async with self._db.execute(
@@ -2035,7 +2486,7 @@ class Storage:
         return data if isinstance(data, dict) else None
 
     async def delete_user_data(self, user_id: int) -> int:
-        """Delete directly-associated preference, recognition, and session data."""
+        """Delete directly-associated user, favorite, recognition, and session data."""
         async with self._db.execute("SELECT token, data FROM sessions") as cur:
             rows = await cur.fetchall()
         owned_tokens = []
@@ -2050,6 +2501,9 @@ class Storage:
             await self._db.executemany(
                 "DELETE FROM sessions WHERE token = ?", owned_tokens
             )
+        favorite_cursor = await self._db.execute(
+            "DELETE FROM user_favorites WHERE user_id = ?", (user_id,)
+        )
         user_cursor = await self._db.execute(
             "DELETE FROM users WHERE user_id = ?", (user_id,)
         )
@@ -2065,4 +2519,5 @@ class Storage:
             + max(0, user_cursor.rowcount)
             + max(0, recognition_cursor.rowcount)
             + max(0, draft_cursor.rowcount)
+            + max(0, favorite_cursor.rowcount)
         )

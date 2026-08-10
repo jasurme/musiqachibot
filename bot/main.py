@@ -14,6 +14,7 @@ from bot import jobs
 from bot.db.storage import Storage
 from bot.handlers import (
     broadcast,
+    favorites,
     media_recognize,
     music_campaigns,
     results,
@@ -97,6 +98,9 @@ async def _set_commands(
             BotCommand(command="round", description=t("cmd_round", locale)),
             BotCommand(
                 command="top_music", description=t("cmd_top_music", locale)
+            ),
+            BotCommand(
+                command="favorites", description=t("cmd_favorites", locale)
             ),
             BotCommand(
                 command="new_music", description=t("cmd_new_music", locale)
@@ -190,6 +194,9 @@ async def main() -> None:
 
         # Order matters: admin broadcasts must preempt every normal workflow;
         # round is state-filtered, and URL must precede catch-all text search.
+        # Favorites goes first so its compact heart callbacks and command are
+        # resolved before broad admin/content workflows.
+        dp.include_router(favorites.router)
         dp.include_router(broadcast.router)
         dp.include_router(top_music.router)
         dp.include_router(music_campaigns.router)

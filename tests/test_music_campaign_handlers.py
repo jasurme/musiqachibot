@@ -203,6 +203,10 @@ def test_all_campaign_locale_keys_have_real_parity():
         "mood_road_header", "mood_workout_header", "mood_calm_header",
         "mood_weekend_header", "music_campaign_unavailable", "btn_back",
         "btn_open_moods", "cmd_total_users", "total_users_report",
+        "cmd_favorites", "favorites_header", "favorites_empty",
+        "btn_add_favorite", "btn_favorite_saved", "favorite_added",
+        "favorite_exists", "favorite_removed", "favorite_unavailable",
+        "favorites_intro", "btn_open_favorites",
     }
     for locale in ("uz", "ru", "en"):
         assert all(t(key, locale) != key for key in keys)
@@ -227,7 +231,7 @@ async def test_bot_command_menu_exposes_every_campaign_in_all_languages():
     assert [language for _commands, language, _scope in admin] == [
         None, "uz", "ru", "en",
     ]
-    regular = {"new_music", "rising", "discoveries", "moods"}
+    regular = {"new_music", "rising", "discoveries", "moods", "favorites"}
     for commands, _language, _scope in public:
         names = {command.command for command in commands}
         assert regular <= names

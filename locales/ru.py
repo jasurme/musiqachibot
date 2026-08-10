@@ -9,11 +9,16 @@ STRINGS = {
         "🔗 Ссылку на Instagram, TikTok, YouTube, Facebook или X\n\n"
         "🕺 Наслаждайтесь!"
     ),
+    "favorites_intro": (
+        "❤️ <b>Теперь любимые песни можно сохранять в Избранное!</b>"
+    ),
     "choose_language": "🌐 Выберите язык:",
     "language_set": "✅ Язык изменён.",
     "cmd_start": "Запустить бота",
     "cmd_round": "Сделать кружочек",
     "cmd_top_music": "Top Music",
+    "cmd_favorites": "Избранное",
+    "btn_open_favorites": "❤️ Избранное",
     "cmd_new_music": "Новая музыка",
     "cmd_rising": "Набирают популярность",
     "cmd_discoveries": "Открытия недели",
@@ -24,6 +29,16 @@ STRINGS = {
         "👥 <b>Пользователи</b>\n\n"
         "Всего: {total}\nАктивных: {active}\nНеактивных: {inactive}"
     ),
+    "favorites_header": "❤️ <b>Избранное</b> · {count} песен",
+    "favorites_empty": (
+        "🤍 В Избранном пока пусто. Нажмите сердечко под песней, чтобы сохранить её."
+    ),
+    "btn_add_favorite": "🤍 Сохранить в Избранное",
+    "btn_favorite_saved": "❤️ В Избранном",
+    "favorite_added": "❤️ Добавлено в Избранное.",
+    "favorite_exists": "❤️ Эта песня уже в Избранном.",
+    "favorite_removed": "🗑 Удалено из Избранного.",
+    "favorite_unavailable": "⚠️ Этой песни больше нет в Избранном.",
     "broadcast_done": (
         "✅ Рассылка завершена. Отправлено: {sent}. "
         "Неактивных: {inactive}. Ошибок: {failed}."

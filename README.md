@@ -47,6 +47,7 @@ challenge solver (`brew install deno` on macOS). The Docker image includes both.
 - [x] **Confirmed admin video broadcast** — choose normal/circle, preview converted media, confirm, then fan out with one instant Top Music button
 - [x] **Durable admin announcements** — immediate non-command messages and files resume from their SQLite cursor after a restart
 - [x] **/top_music** — persisted Top Music chart with direct track buttons, refreshed off-path every 48 hours
+- [x] **/favorites** — private, restart-safe playlists with a heart under every delivered song
 - [x] **Weekly music campaigns** — New Music, real rank movers, discoveries, and five persisted mood libraries delivered to every active user
 - [x] **Admin audience stats** — private admin-only `/total_users` command with total, active, and inactive counts
 - [x] **file_id/search/recognition caches** + bounded global/per-user concurrent jobs
@@ -72,6 +73,16 @@ STRICT_NETWORK_TESTS=1 make test-net
 First fetch = download+convert+upload; **every repeat is usually near-instant**
 (re-sends the file_id, no source download/upload). The actual first-fetch speed
 depends on the provider, egress, media format and Telegram.
+
+Every song delivered from search, charts, mood lists, recognition results, or
+a supported social link in a private chat has a heart button. Saving uses a
+native callback confirmation without adding a status message to the chat.
+`/favorites` is always available from Telegram's bottom command menu. `/start`
+also installs a persistent, localized one-tap Favorites button beside the input
+field. The playlist reads SQLite only and replays saved Telegram `file_id`
+values immediately. Lists are private to each user, paginated ten at a time,
+and support explicit removal. Audio extracted from supported social links can
+be saved in the same playlist.
 
 Cookies are used only to help yt-dlp reach otherwise public media when a source
 bot-checks the server. Private, members-only, premium, and login-only media is

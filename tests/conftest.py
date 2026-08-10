@@ -35,6 +35,7 @@ from bot import jobs
 from bot.db.storage import Storage
 from bot.handlers import (
     broadcast,
+    favorites,
     media_recognize,
     music_campaigns,
     results,
@@ -47,9 +48,18 @@ from bot.handlers import (
 from bot.middlewares.i18n import I18nMiddleware
 
 FAKE_TOKEN = "123456:FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE"
-ALL_ROUTERS = (broadcast.router, top_music.router, music_campaigns.router,
-               round_handler.router, start.router, url_download.router,
-               media_recognize.router, text_search.router, results.router)
+ALL_ROUTERS = (
+    favorites.router,
+    broadcast.router,
+    top_music.router,
+    music_campaigns.router,
+    round_handler.router,
+    start.router,
+    url_download.router,
+    media_recognize.router,
+    text_search.router,
+    results.router,
+)
 
 
 def _now():
@@ -185,14 +195,14 @@ def text_update(text, uid=1, lang="en", user_id=100, chat_id=100, chat_type="pri
 
 def callback_update(
     data, uid=1, lang="en", user_id=100, chat_id=100,
-    message_id=None,
+    message_id=None, chat_type="private",
 ):
     return Update(update_id=uid, callback_query=CallbackQuery(
         id=str(uid), chat_instance="ci", data=data,
         from_user=User(id=user_id, is_bot=False, first_name="T", language_code=lang),
         message=Message(
             message_id=message_id if message_id is not None else uid + 5000,
-            date=_now(), chat=Chat(id=chat_id, type="private"),
+            date=_now(), chat=Chat(id=chat_id, type=chat_type),
         ),
     ))
 

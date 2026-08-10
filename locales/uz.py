@@ -9,11 +9,17 @@ STRINGS = {
         "🔗 Instagram, TikTok, YouTube, Facebook yoki X havolasi\n\n"
         "🕺 Rohatlaning!"
     ),
+    "favorites_intro": (
+        "❤️ <b>Endi yoqtirgan qoʻshiqlaringizni botdagi Sevimlilar "
+        "roʻyxatida saqlashingiz mumkin!</b>"
+    ),
     "choose_language": "🌐 Tilni tanlang:",
     "language_set": "✅ Til oʻzgartirildi.",
     "cmd_start": "Boshlash",
     "cmd_round": "Doira video qilish",
     "cmd_top_music": "Top Music",
+    "cmd_favorites": "Sevimlilar",
+    "btn_open_favorites": "❤️ Sevimlilar",
     "cmd_new_music": "Yangi musiqalar",
     "cmd_rising": "Ommalashayotgan musiqalar",
     "cmd_discoveries": "Haftalik topilmalar",
@@ -24,6 +30,16 @@ STRINGS = {
         "👥 <b>Foydalanuvchilar</b>\n\n"
         "Jami: {total}\nFaol: {active}\nFaol emas: {inactive}"
     ),
+    "favorites_header": "❤️ <b>Sevimlilar</b> · {count} ta qoʻshiq",
+    "favorites_empty": (
+        "🤍 Sevimlilar roʻyxati boʻsh. Qoʻshiq ostidagi yurakni bosing."
+    ),
+    "btn_add_favorite": "🤍 Sevimlilarga saqlash",
+    "btn_favorite_saved": "❤️ Sevimlilarda",
+    "favorite_added": "❤️ Sevimlilarga qoʻshildi.",
+    "favorite_exists": "❤️ Bu qoʻshiq allaqachon Sevimlilarda.",
+    "favorite_removed": "🗑 Sevimlilardan olib tashlandi.",
+    "favorite_unavailable": "⚠️ Bu qoʻshiq Sevimlilarda topilmadi.",
     "broadcast_done": (
         "✅ Eʼlon yakunlandi. Yuborildi: {sent}. "
         "Faol emas: {inactive}. Xato: {failed}."
