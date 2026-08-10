@@ -18,7 +18,7 @@ STRINGS = {
     "cmd_rising": "Ommalashayotgan musiqalar",
     "cmd_discoveries": "Haftalik topilmalar",
     "cmd_moods": "Kayfiyat musiqalari",
-    "cmd_notifications": "Musiqa xabarnomalari",
+    "cmd_total_users": "Foydalanuvchilar soni",
     "cmd_lang": "Tilni oʻzgartirish",
     "cmd_privacy": "Maxfiylik maʼlumoti",
     "cmd_delete_my_data": "Saqlangan maʼlumotimni oʻchirish",
@@ -34,11 +34,13 @@ STRINGS = {
         "Qisqa namuna yoki metadata Shazam/AudD xizmatiga; qidiruv va yuklash "
         "soʻrovlari manba xizmatlariga; matn soʻrovi lyrics.ovh xizmatiga yuborilishi "
         "mumkin. Railway va sozlangan proksi tarmoq trafikini qayta ishlaydi. "
-        "Davriy musiqa xabarnomalarini /notifications orqali boshqarishingiz "
-        "mumkin. "
         "ID raqamingizga bogʻliq maʼlumotlarni oʻchirish uchun /delete_my_data dan foydalaning."
     ),
     "data_deleted": "✅ Foydalanuvchi ID raqamingizga bogʻliq maʼlumotlar oʻchirildi.",
+    "total_users_report": (
+        "👥 <b>Foydalanuvchilar</b>\n\n"
+        "Jami: {total}\nFaol: {active}\nFaol emas: {inactive}"
+    ),
     "broadcast_done": (
         "✅ Eʼlon yakunlandi. Yuborildi: {sent}. "
         "Faol emas: {inactive}. Xato: {failed}."
@@ -84,21 +86,6 @@ STRINGS = {
     ),
     "btn_back": "⬅️ Orqaga",
     "btn_open_moods": "🎭 Kayfiyat musiqalari",
-    "btn_notifications_off": "🔕 Oʻchirish",
-    "btn_notification_settings": "⚙️ Sozlash",
-    "notifications_header": (
-        "<b>🔔 Musiqa xabarnomalari</b>\n"
-        "Qaysi yangiliklarni olishni tanlang:"
-    ),
-    "notification_new_music": "Yangi musiqalar",
-    "notification_rising": "Ommalashayotganlar",
-    "notification_discoveries": "Haftalik topilmalar",
-    "btn_notifications_all_on": "🔔 Barchasini yoqish",
-    "btn_notifications_all_off": "🔕 Barchasini oʻchirish",
-    "notifications_saved": "✅ Saqlandi.",
-    "notifications_category_disabled": "🔕 {name} xabarnomalari oʻchirildi.",
-    "notifications_all_enabled": "🔔 Barcha musiqa xabarnomalari yoqildi.",
-    "notifications_all_disabled": "🔕 Barcha musiqa xabarnomalari oʻchirildi.",
     # Feature D — links
     "fetching": "🔎 Maʼlumot olinmoqda...",
     "choose_quality": "🎬 Sifatni tanlang:",

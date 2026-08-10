@@ -17,7 +17,7 @@ the bot processes any user media.
 | `BOT_TOKEN` | ✅ | your token from @BotFather |
 | `DB_PATH` | recommended | `/data/musiqa.db` (see Volume below) |
 | `DEFAULT_LOCALE` | optional | `uz` |
-| `ADMIN_USER_ID` | recommended | `7645204689`; video/circle requires confirmation, other copyable private messages broadcast immediately |
+| `ADMIN_USER_ID` | recommended | `7645204689`; owns broadcasts and the private `/total_users` audience report |
 | `BROADCAST_RATE_PER_SECOND` | optional | `20`; do not exceed the validated maximum of `25` |
 | `TOP_MUSIC_REFRESH_HOURS` | optional | `48`; refresh the persisted Uzbekistan Top 10 off-path |
 | `TOP_MUSIC_RETRY_MINUTES` | optional | `30`; initial bounded retry after a chart/provider failure |
@@ -48,8 +48,8 @@ DB resets each deploy → language prefs, the `file_id` cache, and button sessio
 That's it — the app writes its DB there and it persists.
 
 The same database stores the last complete Top 10, all weekly music and mood
-snapshots, ranking history, notification preferences, durable campaign cursors,
-admin video confirmation drafts, and every administrator-announcement cursor.
+snapshots, ranking history, durable campaign cursors, admin video confirmation
+drafts, and every administrator-announcement cursor.
 Without the volume, the stored lists must be rebuilt after every deployment and
 partially delivered announcements cannot resume.
 
@@ -70,8 +70,8 @@ replaces the previous one.
 The bot also prepares New Music, Rising, Discoveries, and five ten-track mood
 lists off the request path. The three proactive categories are sent at most
 once in their Asia/Tashkent weekly slots (Monday, conditional Wednesday, and
-Friday), respect `/notifications`, and resume from SQLite after a restart. Mood
-lists refresh weekly but are opened on demand, preventing five extra broadcasts.
+Friday) to every active user and resume from SQLite after a restart. Mood lists
+refresh weekly but are opened on demand, preventing five extra broadcasts.
 The first reliable Rising comparison needs about one week of retained chart
 history. Keep one Railway replica and retain `overlapSeconds=0` so one scheduler
 owns SQLite campaign leases and Telegram polling.

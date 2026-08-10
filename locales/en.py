@@ -18,7 +18,7 @@ STRINGS = {
     "cmd_rising": "Rising music",
     "cmd_discoveries": "Weekly discoveries",
     "cmd_moods": "Music by mood",
-    "cmd_notifications": "Music notifications",
+    "cmd_total_users": "User count",
     "cmd_lang": "Change language",
     "cmd_privacy": "Privacy information",
     "cmd_delete_my_data": "Delete my stored data",
@@ -32,11 +32,14 @@ STRINGS = {
         "Uploaded media and recognition samples are deleted locally after processing.\n\n"
         "Short samples or metadata may be processed by Shazam/AudD; searches and "
         "downloads contact the source services; lyric requests contact lyrics.ovh; "
-        "and Railway plus any configured proxy process network traffic. Manage "
-        "periodic music notifications with /notifications. Use "
+        "and Railway plus any configured proxy process network traffic. Use "
         "/delete_my_data to remove data associated with your user ID."
     ),
     "data_deleted": "✅ Data associated with your user ID was deleted.",
+    "total_users_report": (
+        "👥 <b>Users</b>\n\n"
+        "Total: {total}\nActive: {active}\nInactive: {inactive}"
+    ),
     "broadcast_done": (
         "✅ Broadcast complete. Sent: {sent}. "
         "Inactive: {inactive}. Failed: {failed}."
@@ -78,21 +81,6 @@ STRINGS = {
     ),
     "btn_back": "⬅️ Back",
     "btn_open_moods": "🎭 Music by mood",
-    "btn_notifications_off": "🔕 Disable",
-    "btn_notification_settings": "⚙️ Settings",
-    "notifications_header": (
-        "<b>🔔 Music notifications</b>\n"
-        "Choose which updates you want to receive:"
-    ),
-    "notification_new_music": "New Music",
-    "notification_rising": "Rising Now",
-    "notification_discoveries": "Weekly Discoveries",
-    "btn_notifications_all_on": "🔔 Enable all",
-    "btn_notifications_all_off": "🔕 Disable all",
-    "notifications_saved": "✅ Saved.",
-    "notifications_category_disabled": "🔕 {name} notifications disabled.",
-    "notifications_all_enabled": "🔔 All music notifications enabled.",
-    "notifications_all_disabled": "🔕 All music notifications disabled.",
     # Feature D — links
     "fetching": "🔎 Fetching info...",
     "choose_quality": "🎬 Choose quality:",

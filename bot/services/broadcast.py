@@ -87,15 +87,12 @@ async def broadcast_active(
     through_user_id: int | None = None,
     on_outcome: OutcomeHook | None = None,
     exclude_user_id: int | None = None,
-    notification_mask: int | None = None,
 ) -> BroadcastStats:
     """Run one serial, keyset-paged campaign over active private users.
 
     ``through_user_id`` freezes a scheduled campaign's audience at a known
     upper bound. ``on_outcome`` runs after each recipient's final result and
-    can durably checkpoint ``user_id`` before the next delivery. When
-    ``notification_mask`` is supplied, users who disabled that category are
-    excluded even if they were below the campaign's frozen upper boundary.
+    can durably checkpoint ``user_id`` before the next delivery.
     """
     # ``bot`` is part of the uniform campaign interface; the supplied closure
     # normally captures it to perform the concrete Telegram method.
@@ -112,7 +109,6 @@ async def broadcast_active(
                 limit=500,
                 exclude_user_id=exclude_user_id,
                 through_user_id=ceiling,
-                notification_mask=notification_mask,
             )
             if not user_ids:
                 break

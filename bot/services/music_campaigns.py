@@ -29,11 +29,6 @@ from typing import Any
 import aiohttp
 
 from bot.services.search import SearchItem, search_tracks
-from bot.db.storage import (
-    NOTIFY_DISCOVERIES,
-    NOTIFY_NEW_MUSIC,
-    NOTIFY_RISING_MUSIC,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +83,6 @@ CAMPAIGN_HEADER_KEYS: dict[str, str] = {
     CAMPAIGN_NEW_MUSIC: "new_music_header",
     CAMPAIGN_RISING: "rising_header",
     CAMPAIGN_DISCOVERIES: "discoveries_header",
-}
-CAMPAIGN_NOTIFICATION_MASKS: dict[str, int] = {
-    CAMPAIGN_NEW_MUSIC: NOTIFY_NEW_MUSIC,
-    CAMPAIGN_RISING: NOTIFY_RISING_MUSIC,
-    CAMPAIGN_DISCOVERIES: NOTIFY_DISCOVERIES,
 }
 CAMPAIGN_PRIORITIES: dict[str, int] = {
     CAMPAIGN_NEW_MUSIC: 30,
@@ -838,7 +828,6 @@ def _campaign_descriptor(campaign_key: str, now: int) -> dict[str, Any]:
         "dedupe_key": f"{campaign_key}:{slot_timestamp}",
         "kind": campaign_key,
         "header_key": CAMPAIGN_HEADER_KEYS[campaign_key],
-        "notification_mask": CAMPAIGN_NOTIFICATION_MASKS[campaign_key],
         "eligible_at": eligible_at,
         "expires_at": eligible_at + CAMPAIGN_EXPIRY_SECONDS,
         "priority": CAMPAIGN_PRIORITIES[campaign_key],
@@ -984,7 +973,6 @@ async def _publish_apple_collection(
             kind=descriptor["kind"],
             header_key=descriptor["header_key"],
             items=items,
-            notification_mask=int(descriptor["notification_mask"]),
             eligible_at=int(descriptor["eligible_at"]),
             expires_at=int(descriptor["expires_at"]),
             priority=int(descriptor["priority"]),
@@ -1269,16 +1257,11 @@ async def deliver_next_music_campaign(
     payload = row.get("payload")
     kind = _text(row.get("kind"))
     expected_header = CAMPAIGN_HEADER_KEYS.get(kind)
-    notification_slugs = {
-        CAMPAIGN_NEW_MUSIC: "new",
-        CAMPAIGN_RISING: "rising",
-        CAMPAIGN_DISCOVERIES: "discoveries",
-    }
     try:
         if (
             not runner_token
             or not isinstance(payload, Mapping)
-            or kind not in notification_slugs
+            or kind not in CAMPAIGN_HEADER_KEYS
             or payload.get("header_key") != expected_header
             or not isinstance(payload.get("items"), list)
             or len(payload["items"]) != EDITORIAL_CAMPAIGN_SIZE
@@ -1295,7 +1278,6 @@ async def deliver_next_music_campaign(
 
         items = payload["items"]
         header_key = str(payload["header_key"])
-        notification_slug = notification_slugs[kind]
         include_moods = kind in {CAMPAIGN_NEW_MUSIC, CAMPAIGN_DISCOVERIES}
 
         async def send_one(user_id: int):
@@ -1310,7 +1292,6 @@ async def deliver_next_music_campaign(
                 reply_markup=campaign_list_keyboard(
                     items,
                     translate,
-                    notification_slug=notification_slug,
                     include_moods=include_moods,
                 ),
             )
@@ -1333,7 +1314,6 @@ async def deliver_next_music_campaign(
             send_one=send_one,
             after_user_id=int(row.get("broadcast_cursor") or 0),
             through_user_id=int(row.get("audience_upper_user_id") or 0),
-            notification_mask=int(row["notification_mask"]),
             exclude_user_id=None,
             on_outcome=checkpoint,
         )
@@ -1359,7 +1339,7 @@ async def deliver_next_music_campaign(
 
 
 async def run_music_campaign_scheduler(bot: Any, db: Any, config: Any) -> None:
-    """Maintain weekly snapshots and resume at most three opt-in fan-outs."""
+    """Maintain weekly snapshots and resume at most three fan-outs."""
     logger.info(
         "Music campaign scheduler started timezone=Asia/Tashkent "
         "slots=mon09,wed18,fri18 moods=weekly"

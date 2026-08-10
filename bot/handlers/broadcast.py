@@ -11,7 +11,7 @@ import time
 from typing import Any
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Filter
+from aiogram.filters import Command, Filter
 from aiogram.types import (
     CallbackQuery,
     FSInputFile,
@@ -47,6 +47,7 @@ class AdminPrivateFilter(Filter):
             message.from_user
             and message.chat.type == "private"
             and message.from_user.id == config.admin_user_id
+            and message.chat.id == config.admin_user_id
         )
 
 
@@ -268,6 +269,21 @@ async def _upload_cross_type_preview(
 def _prepared_file_id(message: Message, selected: str) -> str | None:
     media = message.video_note if selected == "video_note" else message.video
     return media.file_id if media else None
+
+
+@router.message(Command("total_users"), AdminPrivateFilter())
+async def total_users(
+    message: Message, db, config: Config, _, **kwargs,
+) -> None:
+    """Report the real broadcast audience to the private administrator only."""
+    counts = await db.get_user_counts(exclude_user_id=config.admin_user_id)
+    await message.answer(_("total_users_report", **counts))
+
+
+@router.message(Command("total_users"))
+async def reject_non_admin_total_users(message: Message, **kwargs) -> None:
+    """Silently prevent the private admin command from leaking or searching."""
+    return None
 
 
 @router.message(AdminPrivateFilter(), F.video | F.video_note)

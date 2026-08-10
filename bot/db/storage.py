@@ -17,18 +17,11 @@ logger = logging.getLogger(__name__)
 
 _DIRECT_BROADCAST_HISTORY_SECONDS = 24 * 60 * 60
 
-# Proactive music-notification categories. Top Music remains available through
-# its command/buttons and mood lists through their hub, but neither consumes a
-# proactive broadcast category.
-NOTIFY_NEW_MUSIC = 1
-NOTIFY_RISING_MUSIC = 2
-NOTIFY_DISCOVERIES = 4
-NOTIFY_ALL_MUSIC = (
-    NOTIFY_NEW_MUSIC | NOTIFY_RISING_MUSIC | NOTIFY_DISCOVERIES
-)
-_NOTIFICATION_BITS = {
-    NOTIFY_NEW_MUSIC, NOTIFY_RISING_MUSIC, NOTIFY_DISCOVERIES,
-}
+# Retain a fixed value in the historical outbox column. Railway databases from
+# the preference-enabled release have this NOT NULL column without a default,
+# so removing it would require a destructive SQLite table rebuild. It is no
+# longer decoded or used to select recipients.
+_LEGACY_OUTBOX_NOTIFICATION_MASK = 1
 _MUSIC_KEY = re.compile(r"[a-z][a-z0-9_:-]{0,63}")
 _YOUTUBE_VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{6,32}")
 _MUSIC_CAMPAIGN_STATUSES = {
@@ -73,8 +66,7 @@ class Storage:
             " user_id INTEGER PRIMARY KEY,"
             " locale TEXT,"
             " is_active INTEGER NOT NULL DEFAULT 1,"
-            " deactivated_at TEXT,"
-            f" notification_mask INTEGER NOT NULL DEFAULT {NOTIFY_ALL_MUSIC})"
+            " deactivated_at TEXT)"
         )
         # Safe forward migration for the original two-column users table.
         async with self._db.execute("PRAGMA table_info(users)") as cur:
@@ -86,11 +78,6 @@ class Storage:
         if "deactivated_at" not in user_columns:
             await self._db.execute(
                 "ALTER TABLE users ADD COLUMN deactivated_at TEXT"
-            )
-        if "notification_mask" not in user_columns:
-            await self._db.execute(
-                "ALTER TABLE users ADD COLUMN notification_mask INTEGER "
-                f"NOT NULL DEFAULT {NOTIFY_ALL_MUSIC}"
             )
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_users_broadcast "
@@ -374,11 +361,35 @@ class Storage:
             await self._db.commit()
         return locale
 
+    async def get_user_counts(
+        self, *, exclude_user_id: int | None = None,
+    ) -> dict[str, int]:
+        """Return total, active, and inactive users in one aggregate query."""
+        where = ""
+        params: tuple[int, ...] = ()
+        if exclude_user_id is not None:
+            where = " WHERE user_id != ?"
+            params = (int(exclude_user_id),)
+        async with self._db.execute(
+            "SELECT COUNT(*), "
+            "COALESCE(SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(CASE WHEN is_active = 1 THEN 0 ELSE 1 END), 0) "
+            "FROM users" + where,
+            params,
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:  # pragma: no cover - aggregate SELECT always returns
+            return {"total": 0, "active": 0, "inactive": 0}
+        return {
+            "total": int(row[0]),
+            "active": int(row[1]),
+            "inactive": int(row[2]),
+        }
+
     async def get_active_user_ids(
         self, *, after_user_id: int = 0, limit: int = 500,
         exclude_user_id: int | None = None,
         through_user_id: int | None = None,
-        notification_mask: int | None = None,
     ) -> list[int]:
         """Return one keyset-paged broadcast batch in stable user-ID order."""
         limit = max(1, min(int(limit), 1000))
@@ -390,12 +401,6 @@ class Storage:
         if through_user_id is not None:
             clauses.append("user_id <= ?")
             params.append(int(through_user_id))
-        if notification_mask is not None:
-            mask = self._validate_notification_mask(
-                notification_mask, allow_zero=True
-            )
-            clauses.append("(notification_mask & ?) != 0")
-            params.append(mask)
         query = (
             "SELECT user_id FROM users WHERE " + " AND ".join(clauses)
             + " ORDER BY user_id LIMIT ?"
@@ -407,7 +412,6 @@ class Storage:
 
     async def get_active_user_upper_bound(
         self, *, exclude_user_id: int | None = None,
-        notification_mask: int | None = None,
     ) -> int:
         """Freeze the upper edge of a new keyset-paged broadcast audience."""
         clauses = ["is_active = 1"]
@@ -415,12 +419,6 @@ class Storage:
         if exclude_user_id is not None:
             clauses.append("user_id != ?")
             params.append(int(exclude_user_id))
-        if notification_mask is not None:
-            mask = self._validate_notification_mask(
-                notification_mask, allow_zero=True
-            )
-            clauses.append("(notification_mask & ?) != 0")
-            params.append(mask)
         query = (
             "SELECT COALESCE(MAX(user_id), 0) FROM users WHERE "
             + " AND ".join(clauses)
@@ -428,73 +426,6 @@ class Storage:
         async with self._db.execute(query, params) as cur:
             row = await cur.fetchone()
         return int(row[0]) if row else 0
-
-    @staticmethod
-    def _validate_notification_mask(
-        mask: int, *, allow_zero: bool = True,
-    ) -> int:
-        if isinstance(mask, bool):
-            raise ValueError("notification mask must be an integer")
-        try:
-            value = int(mask)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("notification mask must be an integer") from exc
-        minimum = 0 if allow_zero else 1
-        if value < minimum or value & ~NOTIFY_ALL_MUSIC:
-            raise ValueError("notification mask contains unsupported bits")
-        return value
-
-    async def get_notification_mask(self, user_id: int) -> int:
-        """Return a user's proactive music categories (all for a new user)."""
-        async with self._db.execute(
-            "SELECT notification_mask FROM users WHERE user_id = ?",
-            (int(user_id),),
-        ) as cur:
-            row = await cur.fetchone()
-        if row is None:
-            return NOTIFY_ALL_MUSIC
-        try:
-            return self._validate_notification_mask(row[0], allow_zero=True)
-        except ValueError:
-            logger.warning(
-                "Resetting invalid notification mask user_id=%s", user_id
-            )
-            await self.set_notification_mask(user_id, NOTIFY_ALL_MUSIC)
-            return NOTIFY_ALL_MUSIC
-
-    async def set_notification_mask(self, user_id: int, mask: int) -> None:
-        """Persist a complete proactive-music preference mask."""
-        value = self._validate_notification_mask(mask, allow_zero=True)
-        async with self._music_write_lock:
-            await self._music_db.execute(
-                "INSERT INTO users (user_id, notification_mask) VALUES (?, ?) "
-                "ON CONFLICT(user_id) DO UPDATE SET "
-                "notification_mask = excluded.notification_mask",
-                (int(user_id), value),
-            )
-            await self._music_db.commit()
-
-    async def toggle_notification_mask(self, user_id: int, bit: int) -> int:
-        """Atomically toggle one supported category and return the new mask."""
-        if isinstance(bit, bool) or int(bit) not in _NOTIFICATION_BITS:
-            raise ValueError("notification bit is not a supported category")
-        value = int(bit)
-        async with self._music_write_lock:
-            async with self._music_db.execute(
-                "INSERT INTO users (user_id, notification_mask) VALUES (?, ?) "
-                "ON CONFLICT(user_id) DO UPDATE SET notification_mask = CASE "
-                    "WHEN (notification_mask & ?) != 0 "
-                    "THEN (notification_mask & ?) "
-                "ELSE (notification_mask | ?) END "
-                "RETURNING notification_mask",
-                (
-                    int(user_id), NOTIFY_ALL_MUSIC & ~value, value,
-                    NOTIFY_ALL_MUSIC & ~value, value,
-                ),
-            ) as cur:
-                row = await cur.fetchone()
-            await self._music_db.commit()
-        return self._validate_notification_mask(row[0], allow_zero=True)
 
     async def mark_users_inactive(self, user_ids: list[int]) -> None:
         """Stop future broadcasts to blocked/deactivated Telegram accounts."""
@@ -1311,9 +1242,6 @@ class Storage:
         header_key = str(campaign.get("header_key") or "").strip()
         if _MUSIC_KEY.fullmatch(header_key) is None:
             raise ValueError("music campaign has an invalid header_key")
-        notification_mask = cls._validate_notification_mask(
-            campaign.get("notification_mask"), allow_zero=False
-        )
         eligible_at = int(campaign.get("eligible_at"))
         raw_expires = campaign.get("expires_at")
         expires_at = int(raw_expires) if raw_expires is not None else None
@@ -1323,7 +1251,6 @@ class Storage:
             "dedupe_key": dedupe_key,
             "kind": kind,
             "header_key": header_key,
-            "notification_mask": notification_mask,
             "eligible_at": eligible_at,
             "expires_at": expires_at,
             "priority": int(campaign.get("priority") or 0),
@@ -1374,7 +1301,7 @@ class Storage:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
             (
                 spec["dedupe_key"], collection_key, int(generation),
-                spec["kind"], payload, spec["notification_mask"],
+                spec["kind"], payload, _LEGACY_OUTBOX_NOTIFICATION_MASK,
                 spec["eligible_at"], spec["expires_at"], spec["priority"],
                 int(created_at),
             ),
@@ -1736,7 +1663,7 @@ class Storage:
             "campaign_id": int(row[0]), "dedupe_key": row[1],
             "collection_key": row[2], "collection_generation": int(row[3]),
             "kind": row[4], "payload": payload,
-            "notification_mask": int(row[6]), "eligible_at": int(row[7]),
+            "eligible_at": int(row[7]),
             "expires_at": int(row[8]) if row[8] is not None else None,
             "priority": int(row[9]), "status": status, "week_key": row[11],
             "slot_no": int(row[12]) if row[12] is not None else None,
@@ -1772,7 +1699,6 @@ class Storage:
         kind: str,
         header_key: str,
         items: list[dict],
-        notification_mask: int,
         eligible_at: int,
         expires_at: int | None,
         priority: int = 0,
@@ -1790,7 +1716,6 @@ class Storage:
             "dedupe_key": dedupe_key,
             "kind": kind,
             "header_key": header_key,
-            "notification_mask": notification_mask,
             "eligible_at": eligible_at,
             "expires_at": expires_at,
             "priority": priority,
@@ -1868,7 +1793,9 @@ class Storage:
                     campaign_id = int(sending[0])
                     cursor = await self._music_db.execute(
                         "UPDATE music_campaign_outbox SET runner_token = ?, "
-                        "runner_lease_until = ? WHERE campaign_id = ? "
+                        "runner_lease_until = ?, audience_upper_user_id = MAX("
+                        "audience_upper_user_id, (SELECT COALESCE(MAX(user_id), 0) "
+                        "FROM users WHERE is_active = 1)) WHERE campaign_id = ? "
                         "AND status = 'sending' AND (runner_lease_until IS NULL "
                         "OR runner_lease_until <= ?)",
                         (token, lease_until, campaign_id, timestamp),
@@ -1897,7 +1824,7 @@ class Storage:
                         await self._music_db.commit()
                         return None
                     async with self._music_db.execute(
-                        "SELECT campaign_id, notification_mask "
+                        "SELECT campaign_id "
                         "FROM music_campaign_outbox WHERE status = 'queued' "
                         "AND eligible_at <= ? AND "
                         "(expires_at IS NULL OR expires_at > ?) "
@@ -1909,13 +1836,9 @@ class Storage:
                         await self._music_db.commit()
                         return None
                     campaign_id = int(ready[0])
-                    mask = self._validate_notification_mask(
-                        ready[1], allow_zero=False
-                    )
                     async with self._music_db.execute(
                         "SELECT COALESCE(MAX(user_id), 0) FROM users "
-                        "WHERE is_active = 1 AND (notification_mask & ?) != 0",
-                        (mask,),
+                        "WHERE is_active = 1",
                     ) as cur:
                         upper = await cur.fetchone()
                     audience_upper = int(upper[0]) if upper else 0

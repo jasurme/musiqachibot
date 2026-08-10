@@ -225,7 +225,7 @@ async def load_top_music(db) -> list[SearchItem]:
 def render_top_music_chart(items: list[Any]) -> str:
     """Render the intentionally minimal chart heading; tracks are buttons."""
     if len(items) != 10:
-        raise ValueError("Top Music notification requires exactly 10 tracks")
+        raise ValueError("Top Music campaign requires exactly 10 tracks")
     return TOP_MUSIC_HEADER
 
 
@@ -261,7 +261,7 @@ async def refresh_top_music_once(
             refresh_seconds=refresh_seconds,
         )
         if changed and not queue_broadcast:
-            # The generalized music cadence owns proactive notifications. Keep
+            # The generalized music cadence owns proactive campaigns. Keep
             # Top Music's fast 48-hour snapshot refresh without adding another
             # three or four messages per week on top of that cadence.
             published = await db.get_top_music_state()

@@ -293,7 +293,7 @@ python-dotenv
   the bounded YouTube search worker, and atomically swaps the complete JSON
   snapshot. Partial/error results keep the last-good snapshot.
 - **Announcements:** the Top 10 is now request-driven so it does not compete
-  with the reviewed weekly campaign notification budget.
+  with the reviewed weekly campaign delivery budget.
 - **Presentation:** the Telegram UI shows only “Top Music” plus ten direct
   track-download buttons. Backend source details remain documented here;
   artwork and previews are deliberately not republished.
@@ -318,9 +318,9 @@ and [Telegram inline keyboards](https://core.telegram.org/bots/features#inline-k
   Music use Asia/Tashkent time. Mood libraries refresh weekly and are promoted
   from those messages rather than creating five additional pushes.
 - **Delivery:** locale-neutral immutable outbox rows freeze the five buttons,
-  opt-in category, audience ceiling, and cursor. Delivery is paced, restart
-  resumable, and capped at three proactive music campaigns per ISO week. Users
-  can opt out per category with `/notifications` while commands remain usable.
+  audience ceiling, and cursor. Delivery reaches every active user, is paced,
+  restart resumable, and capped at three proactive music campaigns per ISO
+  week. Commands remain usable at any time.
 
 ### Current next step
 Deploy the tested Docker image, configure Railway secrets directly, and run a

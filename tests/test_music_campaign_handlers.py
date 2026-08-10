@@ -1,4 +1,4 @@
-"""Dispatcher-level UI tests for stored music campaigns and preferences."""
+"""Dispatcher-level UI tests for stored music campaigns."""
 
 from __future__ import annotations
 
@@ -6,16 +6,9 @@ from types import MethodType
 
 import pytest
 
-from bot.db.storage import (
-    NOTIFY_ALL_MUSIC,
-    NOTIFY_DISCOVERIES,
-    NOTIFY_NEW_MUSIC,
-    NOTIFY_RISING_MUSIC,
-)
 from bot.handlers.music_campaigns import (
     campaign_list_keyboard,
     mood_menu_keyboard,
-    notification_keyboard,
 )
 from bot.i18n import t
 from bot.main import _set_commands
@@ -73,6 +66,11 @@ async def test_editorial_commands_are_single_snapshot_only_responses(
     assert len(rows[:5]) == 5
     assert all(len(row) == 1 for row in rows[:5])
     assert all(row[0].callback_data.startswith("topdl:") for row in rows[:5])
+    assert len(rows) == (6 if include_moods else 5)
+    assert all(
+        not (button.callback_data or "").startswith("notify:")
+        for row in rows for button in row
+    )
     assert any(
         button.callback_data == "moods:open"
         for row in rows for button in row
@@ -164,57 +162,22 @@ async def test_unavailable_mood_uses_callback_alert_without_chat_noise(
     assert cap.by("EditMessageText") == []
 
 
-async def test_notification_preferences_have_three_categories_and_persist(
+async def test_retired_notification_ui_is_absent_and_old_buttons_fail_closed(
     dp, bot, cap, storage,
 ):
-    await dp.feed_update(bot, text_update("/notifications", user_id=77))
-    settings = cap.last("SendMessage")
-    rows = settings.reply_markup.inline_keyboard
-    assert [row[0].callback_data for row in rows[:3]] == [
-        "notify:toggle:new",
-        "notify:toggle:rising",
-        "notify:toggle:discoveries",
-    ]
-    assert all(row[0].text.startswith("✅") for row in rows[:3])
-    assert [button.callback_data for button in rows[-1]] == [
-        "notify:all:on", "notify:all:off",
-    ]
-    assert await storage.get_notification_mask(77) == NOTIFY_ALL_MUSIC
+    await dp.feed_update(bot, text_update("/notifications", uid=50, user_id=77))
+    assert cap.methods == []
+    assert not hasattr(storage, "get_notification_mask")
 
     await dp.feed_update(
-        bot, callback_update("notify:toggle:new", uid=51, user_id=77)
+        bot, callback_update("notify:all:off", uid=51, user_id=77)
     )
-    assert await storage.get_notification_mask(77) == (
-        NOTIFY_RISING_MUSIC | NOTIFY_DISCOVERIES
-    )
-    toggled = cap.last("EditMessageText").reply_markup.inline_keyboard
-    assert toggled[0][0].text.startswith("❌")
-
-    await dp.feed_update(
-        bot, callback_update("notify:all:off", uid=52, user_id=77)
-    )
-    assert await storage.get_notification_mask(77) == 0
-    await dp.feed_update(
-        bot, callback_update("notify:all:on", uid=53, user_id=77)
-    )
-    assert await storage.get_notification_mask(77) == NOTIFY_ALL_MUSIC
-
-
-async def test_campaign_opt_out_is_idempotent_and_sends_no_extra_message(
-    dp, bot, cap, storage,
-):
-    await storage.touch_private_user(88)
-    for uid in (60, 61):
-        await dp.feed_update(
-            bot, callback_update("notify:off:rising", uid=uid, user_id=88)
-        )
-
-    assert await storage.get_notification_mask(88) == (
-        NOTIFY_NEW_MUSIC | NOTIFY_DISCOVERIES
-    )
+    answer = cap.last("AnswerCallbackQuery")
+    assert answer.show_alert is True
+    assert "outdated" in answer.text
     assert cap.by("SendMessage") == []
     assert cap.by("EditMessageText") == []
-    assert len(cap.by("AnswerCallbackQuery")) == 2
+    assert await storage.get_active_user_ids() == [77]
 
 
 def test_campaign_keyboards_are_bounded_and_localized_in_all_languages():
@@ -230,12 +193,6 @@ def test_campaign_keyboards_are_bounded_and_localized_in_all_languages():
         assert all(len(value.encode("utf-8")) <= 64 for value in callbacks)
         assert all(len(row[0].text) <= 100 for row in songs.inline_keyboard)
         assert len(mood_menu_keyboard(translate).inline_keyboard) == 5
-        preferences = notification_keyboard(NOTIFY_ALL_MUSIC, translate)
-        assert len(preferences.inline_keyboard) == 4
-        assert all(
-            key not in preferences.model_dump_json()
-            for key in ("notification_top", "notification_moods")
-        )
 
 
 def test_all_campaign_locale_keys_have_real_parity():
@@ -245,13 +202,7 @@ def test_all_campaign_locale_keys_have_real_parity():
         "mood_calm", "mood_weekend", "mood_night_header",
         "mood_road_header", "mood_workout_header", "mood_calm_header",
         "mood_weekend_header", "music_campaign_unavailable", "btn_back",
-        "btn_open_moods", "btn_notifications_off",
-        "btn_notification_settings", "notifications_header",
-        "notification_new_music", "notification_rising",
-        "notification_discoveries", "btn_notifications_all_on",
-        "btn_notifications_all_off", "notifications_saved",
-        "notifications_category_disabled", "notifications_all_enabled",
-        "notifications_all_disabled",
+        "btn_open_moods", "cmd_total_users", "total_users_report",
     }
     for locale in ("uz", "ru", "en"):
         assert all(t(key, locale) != key for key in keys)
@@ -262,13 +213,28 @@ async def test_bot_command_menu_exposes_every_campaign_in_all_languages():
 
     class FakeBot:
         async def set_my_commands(self, commands, **kwargs):
-            calls.append((commands, kwargs.get("language_code")))
+            calls.append(
+                (commands, kwargs.get("language_code"), kwargs.get("scope"))
+            )
 
-    await _set_commands(FakeBot(), "uz")
+    await _set_commands(FakeBot(), "uz", 7645204689)
 
-    assert [language for _commands, language in calls] == [None, "uz", "ru", "en"]
-    required = {
-        "new_music", "rising", "discoveries", "moods", "notifications",
-    }
-    for commands, _language in calls:
-        assert required <= {command.command for command in commands}
+    public = [call for call in calls if call[2] is None]
+    admin = [call for call in calls if call[2] is not None]
+    assert [language for _commands, language, _scope in public] == [
+        None, "uz", "ru", "en",
+    ]
+    assert [language for _commands, language, _scope in admin] == [
+        None, "uz", "ru", "en",
+    ]
+    regular = {"new_music", "rising", "discoveries", "moods"}
+    for commands, _language, _scope in public:
+        names = {command.command for command in commands}
+        assert regular <= names
+        assert "notifications" not in names
+        assert "total_users" not in names
+    for commands, _language, scope in admin:
+        names = {command.command for command in commands}
+        assert regular | {"total_users"} <= names
+        assert "notifications" not in names
+        assert scope.chat_id == 7645204689

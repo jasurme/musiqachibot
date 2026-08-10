@@ -86,11 +86,13 @@ def _materialize_cookies() -> str | None:
     return None
 
 
-async def _set_commands(bot: Bot, default_locale: str) -> None:
-    from aiogram.types import BotCommand
+async def _set_commands(
+    bot: Bot, default_locale: str, admin_user_id: int,
+) -> None:
+    from aiogram.types import BotCommand, BotCommandScopeChat
 
-    def commands(locale: str) -> list[BotCommand]:
-        return [
+    def commands(locale: str, *, admin: bool = False) -> list[BotCommand]:
+        values = [
             BotCommand(command="start", description=t("cmd_start", locale)),
             BotCommand(command="round", description=t("cmd_round", locale)),
             BotCommand(
@@ -104,10 +106,6 @@ async def _set_commands(bot: Bot, default_locale: str) -> None:
                 command="discoveries", description=t("cmd_discoveries", locale)
             ),
             BotCommand(command="moods", description=t("cmd_moods", locale)),
-            BotCommand(
-                command="notifications",
-                description=t("cmd_notifications", locale),
-            ),
             BotCommand(command="lang", description=t("cmd_lang", locale)),
             BotCommand(command="privacy", description=t("cmd_privacy", locale)),
             BotCommand(
@@ -115,11 +113,34 @@ async def _set_commands(bot: Bot, default_locale: str) -> None:
                 description=t("cmd_delete_my_data", locale),
             ),
         ]
+        if admin:
+            values.append(
+                BotCommand(
+                    command="total_users",
+                    description=t("cmd_total_users", locale),
+                )
+            )
+        return values
 
     try:
         await bot.set_my_commands(commands(default_locale))
         for locale in SUPPORTED:
             await bot.set_my_commands(commands(locale), language_code=locale)
+
+        # A chat-scoped command list replaces the broader default list, so the
+        # administrator receives every normal command plus the private-only
+        # audience counter. Menu scope is convenience; the handler still
+        # performs its own identity and private-chat authorization.
+        admin_scope = BotCommandScopeChat(chat_id=admin_user_id)
+        await bot.set_my_commands(
+            commands(default_locale, admin=True), scope=admin_scope
+        )
+        for locale in SUPPORTED:
+            await bot.set_my_commands(
+                commands(locale, admin=True),
+                scope=admin_scope,
+                language_code=locale,
+            )
     except Exception as exc:  # non-fatal
         logger.warning("set_my_commands failed: %s", exc)
 
@@ -188,7 +209,9 @@ async def main() -> None:
         dp["bot_username"] = me.username
         logger.info("Bot @%s (id=%s) starting long polling...", me.username, me.id)
 
-        await _set_commands(bot, config.default_locale)
+        await _set_commands(
+            bot, config.default_locale, config.admin_user_id
+        )
         await bot.delete_webhook(drop_pending_updates=config.drop_pending_updates)
         # Snapshot resumable manual campaigns before polling can accept a new
         # Confirm callback. Delivery stays in the background, while the fixed

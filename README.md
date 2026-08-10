@@ -47,7 +47,8 @@ challenge solver (`brew install deno` on macOS). The Docker image includes both.
 - [x] **Confirmed admin video broadcast** — choose normal/circle, preview converted media, confirm, then fan out with one instant Top Music button
 - [x] **Durable admin announcements** — immediate non-command messages and files resume from their SQLite cursor after a restart
 - [x] **/top_music** — persisted Top Music chart with direct track buttons, refreshed off-path every 48 hours
-- [x] **Weekly music campaigns** — New Music, real rank movers, discoveries, five persisted mood libraries, and per-user notification controls
+- [x] **Weekly music campaigns** — New Music, real rank movers, discoveries, and five persisted mood libraries delivered to every active user
+- [x] **Admin audience stats** — private admin-only `/total_users` command with total, active, and inactive counts
 - [x] **file_id/search/recognition caches** + bounded global/per-user concurrent jobs
 - [x] Killable, concurrency-limited provider workers with byte/duration/deadline guards
 - [x] Shazamio recognition with optional **AudD fallback** (`AUDD_TOKEN`)
@@ -80,6 +81,8 @@ rejected even if the shared cookie account can access it.
 chat first gets normal/circle choices and an explicit confirmation; converted
 media is uploaded once and its Telegram `file_id` is reused for the fan-out.
 Other copyable admin messages keep the immediate announcement behavior.
+The private admin menu also exposes `/total_users` for total, active, and
+inactive audience counts; regular users never see or access that command.
 Every announcement is persisted before its first recipient, so a Railway
 restart resumes the unsent remainder. Slash commands still run normally and
 are never broadcast. Announcements have no forward attribution and are paced at
@@ -103,10 +106,9 @@ resolved tracks; Rising uses retained ranking history and notifies only when at
 least three songs have meaningfully moved. Night, road, workout, calm, and
 weekend each keep exactly ten last-good tracks and refresh weekly. Proactive
 messages are limited to Monday Discoveries, conditional Wednesday Rising, and
-Friday New Music in Asia/Tashkent. Users can disable any category from its
-message or with `/notifications`; the interactive commands remain available.
-Campaign payloads, audience bounds, and recipient cursors survive Railway
-restarts.
+Friday New Music in Asia/Tashkent. Every active user receives these campaigns;
+the interactive commands remain available at any time. Campaign payloads,
+audience bounds, and recipient cursors survive Railway restarts.
 
 ## Railway / cloud YouTube setup
 

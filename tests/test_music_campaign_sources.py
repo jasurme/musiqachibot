@@ -7,12 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot.db.storage import (
-    NOTIFY_DISCOVERIES,
-    NOTIFY_NEW_MUSIC,
-    NOTIFY_RISING_MUSIC,
-    Storage,
-)
+from bot.db.storage import Storage
 from bot.services.music_campaigns import (
     CAMPAIGN_DISCOVERIES,
     CAMPAIGN_NEW_MUSIC,
@@ -333,15 +328,24 @@ def _published_items() -> list[dict]:
     ]
 
 
-async def test_scheduled_delivery_resumes_localizes_and_honors_opt_out(tmp_path):
+async def test_scheduled_delivery_resumes_localizes_and_reaches_all_active_users(
+    tmp_path,
+):
     db = Storage(str(tmp_path / "localized-resume.db"))
     await db.init()
     await db.set_locale(11, "uz")
     await db.set_locale(22, "ru")
     await db.set_locale(33, "en")
-    await db.set_notification_mask(
-        33, NOTIFY_RISING_MUSIC | NOTIFY_DISCOVERIES
+    # Preserve a real legacy preference column and disabled value. Delivery
+    # must ignore it without requiring a destructive Railway migration.
+    await db._db.execute(
+        "ALTER TABLE users ADD COLUMN notification_mask "
+        "INTEGER NOT NULL DEFAULT 7"
     )
+    await db._db.execute(
+        "UPDATE users SET notification_mask = 0 WHERE user_id = 33"
+    )
+    await db._db.commit()
 
     slot = int(datetime.fromisoformat("2026-08-07T13:00:00+00:00").timestamp())
     await db.ensure_music_collection(CAMPAIGN_NEW_MUSIC, 5)
@@ -387,11 +391,17 @@ async def test_scheduled_delivery_resumes_localizes_and_honors_opt_out(tmp_path)
     assert [(chat_id, text) for chat_id, text, _ in bot.sent] == [
         (11, "<b>🔥 Yangi musiqalar</b>"),
         (22, "<b>🔥 Новая музыка</b>"),
+        (33, "<b>🔥 New Music</b>"),
     ]
-    assert all(chat_id != 33 for chat_id, _, _ in bot.sent)
-    assert len(bot.sent[0][2].inline_keyboard) == 7  # 5 tracks + moods + settings
+    assert len(bot.sent[0][2].inline_keyboard) == 6  # 5 tracks + moods
+    assert all(
+        not (button.callback_data or "").startswith("notify:")
+        for _chat_id, _text, markup in bot.sent
+        for row in markup.inline_keyboard
+        for button in row
+    )
     completed = await db.get_music_campaign(1)
     assert completed is not None
     assert completed["status"] == "completed"
-    assert completed["broadcast_sent"] == 2
+    assert completed["broadcast_sent"] == 3
     await db.close()
