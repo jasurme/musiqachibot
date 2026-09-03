@@ -687,9 +687,14 @@ async def test_pick_downloads_signs_and_caches(dp, bot, cap, config, monkeypatch
     assert await storage.get_cached_audio("bot:123456:ytaudio:v0") is not None
     ack = cap.last("AnswerCallbackQuery")
     assert ack is not None and ack.text is None
-    assert cap.names().index("AnswerCallbackQuery") < cap.names().index("SendAudio")
-    assert cap.by("SendMessage") == []
-    assert cap.by("DeleteMessage") == []
+    status = cap.by("SendMessage")
+    assert len(status) == 1 and status[0].text == "⏳ Downloading..."
+    assert (
+        cap.names().index("AnswerCallbackQuery")
+        < cap.names().index("SendMessage")
+        < cap.names().index("SendAudio")
+        < cap.names().index("DeleteMessage")
+    )
 
     # 3) second identical pick → NO new download, reuses cached file_id
     cap.methods.clear()
@@ -697,6 +702,42 @@ async def test_pick_downloads_signs_and_caches(dp, bot, cap, config, monkeypatch
     sa2 = cap.last("SendAudio")
     assert counter["n"] == 1, "cache miss — should not re-download"
     assert isinstance(sa2.audio, str) and sa2.audio.startswith("AUDIO_")
+    assert cap.by("SendMessage") == []
+    assert cap.by("DeleteMessage") == []
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [
+        ("uz", "⏳ Yuklanmoqda..."),
+        ("ru", "⏳ Загружается..."),
+        ("en", "⏳ Downloading..."),
+    ],
+)
+async def test_track_download_status_uses_saved_locale(
+    dp, bot, cap, config, monkeypatch, storage, locale, expected,
+):
+    results._SESS["localized"] = {
+        "header": "h", "items": _items(1), "per_page": 5,
+        "extras": False, "owner_user_id": 100,
+    }
+    await storage.set_locale(100, locale)
+    fake_download = _fake_dl(config, {"n": 0})
+
+    async def download_audio(url, out_dir, max_bytes=None):
+        assert cap.last("SendMessage").text == expected
+        return await fake_download(url, out_dir, max_bytes)
+
+    monkeypatch.setattr(downloader, "download_audio", download_audio)
+    await dp.feed_update(
+        bot,
+        callback_update(
+            "pick:localized:0", lang="ru", user_id=100, chat_id=100,
+        ),
+    )
+
+    assert cap.by("SendMessage")[0].text == expected
+    assert cap.last("SendAudio") is not None
 
 
 async def test_cached_track_bypasses_busy_heavy_job_limit(

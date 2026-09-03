@@ -238,12 +238,13 @@ async def deliver_track(
     cache_key = downloader.telegram_media_cache_key(
         callback.bot.id, item.url, "audio", media_id=item.video_id
     )
+    status: Message | None = None
     path: str | None = None
     stage = "telegram"
     claimed = False
     try:
         # Acknowledge immediately so Telegram removes the button spinner while
-        # provider/cache work continues without a separate progress message.
+        # the fast Telegram cache lookup runs.
         if acknowledge:
             await callback.answer()
         stage = "cache"
@@ -255,6 +256,14 @@ async def deliver_track(
                 round((time.perf_counter() - delivery_started) * 1000),
             )
             return
+
+        # A cache miss can spend several seconds waiting for another request or
+        # downloading from the provider. Give the user immediate feedback in
+        # their resolved locale while that work runs.
+        try:
+            status = await callback.message.answer(_("sending_track"))
+        except Exception:
+            logger.debug("Could not send track status message", exc_info=True)
 
         # Only one user downloads/uploads a particular uncached track. Others
         # wait without consuming heavy capacity, then reuse its new file_id.
@@ -373,6 +382,13 @@ async def deliver_track(
             failure = _("generic_error")
         await callback.message.answer(failure)
     finally:
+        if status is not None:
+            try:
+                await status.delete()
+            except Exception:
+                logger.debug(
+                    "Could not delete track status message", exc_info=True
+                )
         if path and os.path.exists(path):
             try:
                 os.remove(path)

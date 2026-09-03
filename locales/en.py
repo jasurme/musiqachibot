@@ -100,7 +100,7 @@ STRINGS = {
     "searching": "🔎 Searching...",
     "no_results": "😔 Nothing found. Try a different name.",
     "query_too_long": "⚠️ That search is too long. Keep it under {limit} characters.",
-    "sending_track": "⏳ Sending...",
+    "sending_track": "⏳ Downloading...",
     "btn_lyrics": "Lyrics",
     "btn_video": "Video",
     "btn_listen": "Listen",

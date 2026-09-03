@@ -105,7 +105,7 @@ STRINGS = {
     "searching": "🔎 Qidirilmoqda...",
     "no_results": "😔 Hech narsa topilmadi. Boshqa nom bilan urinib koʻring.",
     "query_too_long": "⚠️ Qidiruv juda uzun. Uni {limit} belgidan oshirmang.",
-    "sending_track": "⏳ Yuborilmoqda...",
+    "sending_track": "⏳ Yuklanmoqda...",
     "btn_lyrics": "Matn",
     "btn_video": "Video",
     "btn_listen": "Tinglash",
